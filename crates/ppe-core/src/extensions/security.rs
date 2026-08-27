@@ -290,6 +290,34 @@ pub struct WorkloadIdentity {
     /// `ClientExtension` slot, not here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
+
+    /// Raw remaining claims from the workload's credential, keyed by
+    /// claim name. `Value` (not `String`) for the same reason as
+    /// [`SubjectExtension::claims`]: a nested claim must reach a
+    /// policy with its shape intact.
+    ///
+    /// A JWT-SVID often carries authorization data beyond the SPIFFE
+    /// ID — what the peer is entitled to ask for. Without this the
+    /// issuer's decision is dropped at the boundary and the peer's
+    /// identity arrives with no authority attached.
+    #[serde(default)]
+    pub claims: HashMap<String, Value>,
+}
+
+impl WorkloadIdentity {
+    /// A claim's value as a string, when that claim holds a scalar.
+    ///
+    /// Mirrors [`SubjectExtension::claim_str`]: strings borrow, numbers
+    /// and booleans render, and structured claims return `None` because
+    /// they do not name a single value.
+    pub fn claim_str(&self, name: &str) -> Option<Cow<'_, str>> {
+        match self.claims.get(name)? {
+            Value::String(s) => Some(Cow::Borrowed(s.as_str())),
+            Value::Number(n) => Some(Cow::Owned(n.to_string())),
+            Value::Bool(b) => Some(Cow::Owned(b.to_string())),
+            Value::Object(_) | Value::Array(_) | Value::Null => None,
+        }
+    }
 }
 
 /// Security-related extensions.
