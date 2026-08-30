@@ -61,6 +61,33 @@ pub struct JwtIdentityResolverConfig {
     /// `StandardClaimMap`.
     #[serde(default)]
     pub claim_mapper: Option<String>,
+
+    /// Whether a token must be present.
+    ///
+    /// `true` (default): a request whose configured header carries no
+    /// token is denied, the standalone bearer-auth posture.
+    ///
+    /// `false`: the optional-authentication posture. A request with no
+    /// token resolves no identity and continues, letting a later filter
+    /// resolve a different credential (e.g. a peer certificate). A token
+    /// that *is* present but invalid is still denied. Pair it with a
+    /// downstream default-deny gate (`rate_limit: per_principal`) that
+    /// refuses anything which resolved no identity of any kind.
+    ///
+    /// This is a standard gateway pattern, not a local invention. It is
+    /// Envoy's `jwt_authn` `allow_missing` (continue if absent, reject if
+    /// present-but-invalid; distinct from the looser
+    /// `allow_missing_or_failed`), and it is the Istio split of an
+    /// optional `RequestAuthentication` plus a separate `AuthorizationPolicy`
+    /// gate — here the resolver is the optional authn and `per_principal`
+    /// is the gate.
+    #[serde(default = "default_required")]
+    pub required: bool,
+}
+
+/// Default for [`JwtIdentityResolverConfig::required`]: fail closed.
+const fn default_required() -> bool {
+    true
 }
 
 fn default_role() -> TokenRole {

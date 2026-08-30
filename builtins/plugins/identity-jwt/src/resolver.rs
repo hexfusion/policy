@@ -105,6 +105,10 @@ pub struct JwtIdentityResolver {
     /// `RawInboundToken.source_header` so forwarding plugins know
     /// where to put it (or strip it) on the upstream call.
     header: String,
+    /// Whether a token must be present (see the config field). When
+    /// `false`, an absent token resolves no identity and continues
+    /// rather than denying.
+    required: bool,
     /// Background JWKS-refresh tasks, one per `JwksUrl` issuer.
     /// Spawned during `initialize()`. Aborted in the resolver's
     /// `Drop` impl — without that, tokio `JoinHandles` silently
@@ -241,6 +245,7 @@ impl JwtIdentityResolver {
             claim_mapper,
             role: typed.role,
             header: typed.header,
+            required: typed.required,
             refresh_tasks: std::sync::Mutex::new(Vec::new()),
         })
     }
@@ -431,6 +436,13 @@ impl HookHandler<IdentityHook> for JwtIdentityResolver {
         let raw_token: String = match header_value {
             Some(v) => v.strip_prefix("Bearer ").unwrap_or(v).to_owned(),
             None if !payload.raw_token().is_empty() => payload.raw_token().to_owned(),
+            None if !self.required => {
+                // Optional resolver: no token presented. Resolve no identity
+                // and continue so a later filter can resolve another
+                // credential; a downstream default-deny gate is the backstop.
+                // A token that IS present but invalid is still denied below.
+                return PluginResult::allow();
+            },
             None => {
                 return PluginResult::deny(PluginViolation::new(
                     "auth.malformed_header",
@@ -976,6 +988,39 @@ mod tests {
             deny_code_for(&resolver, payload).await,
             "auth.malformed_header"
         );
+    }
+
+    #[tokio::test]
+    async fn an_optional_resolver_continues_on_a_missing_header() {
+        // required: false lets a request with no token through, so a shared
+        // chain can fall to another credential (e.g. a peer certificate) with
+        // a downstream default-deny gate as the backstop. A token that IS
+        // present but invalid is still denied by the branches below this one.
+        let cfg = cfg_with_config(
+            "jwt",
+            serde_json::json!({
+                "trusted_issuers": [{
+                    "issuer": "https://idp.example",
+                    "audiences": ["test-aud"],
+                    "algorithms": ["HS256"],
+                    "decoding_key": { "kind": "secret", "secret": "test-secret" },
+                }],
+                "header": "X-User-Token",
+                "claim_mapper": "standard",
+                "required": false,
+            }),
+        );
+        let resolver = JwtIdentityResolver::new(cfg).expect("a valid resolver config");
+        let payload = IdentityPayload::new("", TokenSource::Bearer)
+            .with_headers(HashMap::from([("other".to_owned(), "v".to_owned())]));
+        let r = resolver
+            .handle(&payload, &Extensions::default(), &mut PluginContext::new())
+            .await;
+        assert!(
+            r.continue_processing,
+            "an optional resolver must not deny a request that presented no token"
+        );
+        assert!(r.violation.is_none(), "continuing must carry no violation");
     }
 
     /// Present but empty is its own case: the header map has the key, so the
