@@ -24,6 +24,11 @@ keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
 
+[features]
+# Exposes the hot-path functions for the microbenchmark. Off by default, so
+# a normal build keeps them private.
+bench = []
+
 [dependencies]
 praxis-policy-core = { workspace = true }
 
@@ -48,6 +53,14 @@ mockito = "1"
 # the counter so a principal is provably denied once its debits reach the
 # budget, which a fixed-response mock cannot show.
 axum = "0.8"
+# Hot-path microbenchmark harness. Light dep tree, and the plugin's first
+# bench, so it stays a dev-dependency behind the `bench` feature.
+divan = "0.1"
+
+[[bench]]
+name = "hot_path"
+harness = false
+required-features = ["bench"]
 
 [lints]
 workspace = true
