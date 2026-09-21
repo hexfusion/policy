@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Praxis Contributors
+
+# praxis-policy-plugin-quota — durable per-consumer token
+# quota, enforced as a policy against a standalone Limitador.
+#
+# Registers a pre-invoke check on `cmf.llm_input` and a post-invoke
+# debit on `cmf.llm_output`. The counter lives in Limitador (durable,
+# replica-correct), not in the pod.
+#
+# Lightweight (reqwest + serde), so it stays in the workspace's
+# default-members.
+
+[package]
+name = "praxis-policy-plugin-quota"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "PPE policy plugin — durable per-consumer token quota backed by Limitador."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+praxis-policy-core = { workspace = true }
+
+# Async HTTP to Limitador `/check` and `/report`. Same backend
+# choice as the other builtin plugins (identity-jwt, delegator-oauth):
+# `rustls-tls` avoids an OpenSSL system dep, `json` drives the request
+# body. cargo dedups to the one reqwest already in the tree.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# `#[tokio::test]` for the async client/handler tests.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# Fixed-response mock Limitador for the check / report unit tests, the same
+# local HTTP server harness identity-jwt uses for its JWKS tests.
+mockito = "1"
+# Stateful mock Limitador for the cross-request accounting test: it models
+# the counter so a principal is provably denied once its debits reach the
+# budget, which a fixed-response mock cannot show.
+axum = "0.8"
+
+[lints]
+workspace = true
