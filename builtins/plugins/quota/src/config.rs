@@ -12,6 +12,10 @@ use serde::{Deserialize, Serialize};
 /// enforces one per-consumer budget against one Limitador namespace. The
 /// budget value lives in Limitador's `limits.yaml`, not here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+// Reject an unknown key rather than defaulting it. A typo in an optional
+// field (`identityClaim` for `identity_claim`, `onError` for `on_error`)
+// would otherwise key budgets on the wrong claim or silently fail open.
+#[serde(deny_unknown_fields)]
 pub struct QuotaConfig {
     /// Limitador base URL, e.g. `http://limitador.grid-system.svc:8080`.
     /// The plugin POSTs to `{endpoint}/check` and `{endpoint}/report`.
@@ -123,6 +127,19 @@ mod tests {
         assert_eq!(cfg.on_error, OnErrorMode::Deny);
         assert_eq!(cfg.usage_json_path, "usage/total_tokens");
         assert_eq!(cfg.timeout_seconds, 2);
+    }
+
+    #[test]
+    fn an_unknown_field_is_rejected() {
+        // A misspelled optional key (here `on_error` as camelCase) must fail
+        // the parse rather than silently defaulting and failing open.
+        let err = serde_json::from_value::<QuotaConfig>(json!({
+            "endpoint": "http://lim:8080",
+            "namespace": "ns",
+            "onError": "allow",
+        }))
+        .unwrap_err();
+        assert!(err.to_string().contains("onError"), "{err}");
     }
 
     #[test]
