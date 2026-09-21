@@ -8,8 +8,9 @@
 # debit on `cmf.llm_output`. The counter lives in Limitador (durable,
 # replica-correct), not in the pod.
 #
-# Lightweight (reqwest + serde), so it stays in the workspace's
-# default-members.
+# The Limitador calls go through the host HTTP transport (the `perform_http`
+# capability), so the plugin carries no HTTP client or TLS stack of its own.
+# Lightweight (serde only), so it stays in the workspace's default-members.
 
 [package]
 name = "praxis-policy-plugin-quota"
@@ -32,11 +33,9 @@ bench = []
 [dependencies]
 praxis-policy-core = { workspace = true }
 
-# Async HTTP to Limitador `/check` and `/report`. Same backend
-# choice as the other builtin plugins (identity-jwt, delegator-oauth):
-# `rustls-tls` avoids an OpenSSL system dep, `json` drives the request
-# body. cargo dedups to the one reqwest already in the tree.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# The JSON request bodies for Limitador `/check` and `/report`. The bytes
+# are handed to the host transport; no HTTP client lives here.
+bytes = { workspace = true }
 
 async-trait = { workspace = true }
 serde = { workspace = true }
@@ -44,15 +43,13 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+# `test-util` exposes `http_testing::FakeTransport`, which scripts Limitador
+# responses (and a failure or withheld grant) without a socket. The
+# cross-request accounting test adds a small in-process stateful transport, so
+# no mock HTTP server is needed.
+praxis-policy-core = { workspace = true, features = ["test-util"] }
 # `#[tokio::test]` for the async client/handler tests.
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-# Fixed-response mock Limitador for the check / report unit tests, the same
-# local HTTP server harness identity-jwt uses for its JWKS tests.
-mockito = "1"
-# Stateful mock Limitador for the cross-request accounting test: it models
-# the counter so a principal is provably denied once its debits reach the
-# budget, which a fixed-response mock cannot show.
-axum = "0.8"
 # Hot-path microbenchmark harness. Light dep tree, and the plugin's first
 # bench, so it stays a dev-dependency behind the `bench` feature.
 divan = "0.1"

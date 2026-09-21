@@ -8,8 +8,11 @@
 //       - name: token-quota
 //         kind: quota
 //         hooks: [cmf.llm_input, cmf.llm_output]
-//         # Required: without these the identity is filtered to None and nothing meters.
-//         capabilities: [read_subject, read_claims]
+//         # read_subject/read_claims: without these the identity is filtered
+//         # to None and nothing meters. perform_http: the check and debit are
+//         # outbound calls through the host transport; withholding it fails the
+//         # call, so `on_error` governs (deny = fail closed).
+//         capabilities: [read_subject, read_claims, perform_http]
 //         config:
 //           endpoint: http://limitador.grid-system.svc:8080
 //           namespace: grid-tokens
@@ -19,6 +22,12 @@
 //
 // The two hook points are registered from code, so the operator's `hooks:`
 // list is documentation, not a lever.
+//
+// Deployment note: the check and debit run through the host HTTP transport,
+// which enforces the host's egress policy. Limitador is usually an in-cluster
+// Service on a private (RFC 1918) ClusterIP, and a transport that blocks
+// private destinations by default refuses every call. Ensure the host
+// transport permits the Limitador address, or those calls fail into `on_error`.
 
 use std::sync::Arc;
 

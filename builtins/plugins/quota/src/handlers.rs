@@ -13,7 +13,7 @@ use praxis_policy_core::hooks::{Extensions, HookHandler, PluginResult};
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
 use praxis_policy_core::prelude::PluginContext;
 
-use crate::backend::{CheckOutcome, QuotaBackend};
+use crate::backend::{BackendErrorKind, CheckOutcome, QuotaBackend};
 use crate::client::LimitadorClient;
 use crate::config::{OnErrorMode, QuotaConfig};
 
@@ -69,16 +69,11 @@ impl Quota {
             .boxed()
         })?;
 
-        let backend: Box<dyn QuotaBackend> = Box::new(
-            LimitadorClient::new(&typed.endpoint, &typed.namespace, typed.timeout()).map_err(
-                |e| {
-                    PluginError::Config {
-                        message: format!("plugin '{}' (quota): {e}", cfg.name),
-                    }
-                    .boxed()
-                },
-            )?,
-        );
+        let backend: Box<dyn QuotaBackend> = Box::new(LimitadorClient::new(
+            &typed.endpoint,
+            &typed.namespace,
+            typed.timeout(),
+        ));
 
         Ok(Self {
             cfg,
@@ -134,7 +129,7 @@ impl HookHandler<CmfHook> for QuotaCheck {
             return PluginResult::allow();
         };
 
-        match self.core.backend.check(claim, &sub).await {
+        match self.core.backend.check(extensions, claim, &sub).await {
             Ok(CheckOutcome::WithinLimit) => PluginResult::allow(),
             Ok(CheckOutcome::OverLimit) => PluginResult::deny(
                 PluginViolation::new(CODE_QUOTA_EXHAUSTED, "token budget exhausted")
@@ -142,17 +137,35 @@ impl HookHandler<CmfHook> for QuotaCheck {
                     .with_proto_error_code(HTTP_TOO_MANY_REQUESTS),
             ),
             Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    on_error = ?self.core.typed.on_error,
-                    "quota: check call failed; applying on_error posture"
-                );
-                match self.core.typed.on_error {
-                    OnErrorMode::Allow => PluginResult::allow(),
-                    OnErrorMode::Deny => PluginResult::deny(PluginViolation::new(
+                let deny = || {
+                    PluginResult::deny(PluginViolation::new(
                         CODE_QUOTA_BACKEND_UNAVAILABLE,
                         "token budget backend unavailable",
-                    )),
+                    ))
+                };
+                match e.kind {
+                    // A misconfigured plugin (no transport, or `perform_http`
+                    // withheld) is not an unreachable Limitador, so `on_error`
+                    // does not apply: never serve unmetered on a wiring fault.
+                    BackendErrorKind::Unavailable => {
+                        tracing::error!(
+                            error = %e,
+                            "quota: check cannot run (transport unavailable or \
+                             perform_http withheld); denying regardless of on_error"
+                        );
+                        deny()
+                    },
+                    BackendErrorKind::Transport => {
+                        tracing::warn!(
+                            error = %e,
+                            on_error = ?self.core.typed.on_error,
+                            "quota: check call failed; applying on_error posture"
+                        );
+                        match self.core.typed.on_error {
+                            OnErrorMode::Allow => PluginResult::allow(),
+                            OnErrorMode::Deny => deny(),
+                        }
+                    },
                 }
             },
         }
@@ -212,7 +225,12 @@ impl HookHandler<CmfHook> for QuotaReport {
             return PluginResult::allow();
         }
 
-        if let Err(e) = self.core.backend.report(claim, &sub, total).await {
+        if let Err(e) = self
+            .core
+            .backend
+            .report(extensions, claim, &sub, total)
+            .await
+        {
             // A report failure never denies. The response is already out.
             tracing::warn!(
                 error = %e,

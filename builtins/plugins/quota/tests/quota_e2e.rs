@@ -1,21 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-//! End-to-end behavior of the two hook handlers against a mock Limitador.
+//! End-to-end behavior of the two hook handlers against a scripted Limitador.
 //!
-//! The four rows the plugin exists to get right: over budget denies, under
-//! budget allows, an unreachable Limitador honors `on_error`, and an
-//! output with no usage debits nothing and never denies.
+//! The rows the plugin exists to get right: over budget denies, under budget
+//! allows, an unreachable or ungranted Limitador honors `on_error`, and an
+//! output with no usage debits nothing and never denies. Limitador is scripted
+//! through the host transport rather than a mock server, so the same
+//! `perform_http` seam the plugin uses in production is what the tests drive.
 
 #![allow(clippy::expect_used, clippy::unwrap_used, reason = "tests")]
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use bytes::Bytes;
 use praxis_policy_core::cmf::{Message, MessagePayload, Role};
 use praxis_policy_core::extensions::{
     CompletionExtension, Extensions, SecurityExtension, SubjectExtension, TokenUsage,
 };
 use praxis_policy_core::hooks::HookHandler as _;
+use praxis_policy_core::host::HttpTransportSlot;
+use praxis_policy_core::http::{HttpRequest, HttpResponse, HttpTransport, HttpTransportError};
+use praxis_policy_core::http_testing::FakeTransport;
 use praxis_policy_core::plugin::PluginConfig;
 use praxis_policy_core::prelude::PluginContext;
 use serde_json::json;
@@ -23,13 +29,15 @@ use serde_json::json;
 use praxis_policy_plugin_quota::factory::KIND;
 use praxis_policy_plugin_quota::handlers::{Quota, QuotaCheck, QuotaReport};
 
-/// Build a core pointed at `endpoint`, with an optional `on_error` override.
-fn core(endpoint: &str, on_error: &str) -> Arc<Quota> {
+/// Build a core with an optional `on_error` override. The endpoint is a fixed
+/// placeholder: the transport matches on the `/check` and `/report` path, not
+/// on the host.
+fn core(on_error: &str) -> Arc<Quota> {
     let cfg = PluginConfig {
         name: "token-quota".into(),
         kind: KIND.into(),
         config: Some(json!({
-            "endpoint": endpoint,
+            "endpoint": "http://limitador.test",
             "namespace": "grid-tokens",
             "on_error": on_error,
             "timeout_seconds": 1,
@@ -39,7 +47,9 @@ fn core(endpoint: &str, on_error: &str) -> Arc<Quota> {
     Arc::new(Quota::new(cfg).expect("core builds"))
 }
 
-fn ext_with_sub(sub: &str) -> Extensions {
+/// Identity extensions for `sub`, with `transport` wired into the
+/// `perform_http` slot the plugin reaches for its Limitador calls.
+fn ext_with_sub(sub: &str, transport: Arc<dyn HttpTransport>) -> Extensions {
     Extensions {
         security: Some(Arc::new(SecurityExtension {
             subject: Some(SubjectExtension {
@@ -48,8 +58,28 @@ fn ext_with_sub(sub: &str) -> Extensions {
             }),
             ..Default::default()
         })),
+        http_transport: HttpTransportSlot::installed(transport),
         ..Default::default()
     }
+}
+
+/// The typed completion usage alongside identity, with the transport wired in.
+fn ext_with_sub_and_usage(sub: &str, total: u32, transport: Arc<dyn HttpTransport>) -> Extensions {
+    let mut ext = ext_with_sub(sub, transport);
+    ext.completion = Some(Arc::new(CompletionExtension {
+        tokens: Some(TokenUsage {
+            total_tokens: total,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }));
+    ext
+}
+
+/// Coerce a scripted `FakeTransport` handle to the trait object the plugin
+/// sees, keeping the concrete handle for post-call assertions.
+fn as_transport(t: &Arc<FakeTransport>) -> Arc<dyn HttpTransport> {
+    t.clone()
 }
 
 fn input_payload() -> MessagePayload {
@@ -66,17 +96,11 @@ fn output_payload(body: &str) -> MessagePayload {
 
 #[tokio::test]
 async fn under_budget_check_allows() {
-    let mut server = mockito::Server::new_async().await;
-    server
-        .mock("POST", "/check")
-        .with_status(200)
-        .create_async()
-        .await;
-
-    let handler = QuotaCheck::new(core(&server.url(), "allow"));
+    let t = Arc::new(FakeTransport::new().json("/check", 200, ""));
+    let handler = QuotaCheck::new(core("allow"));
     let mut ctx = PluginContext::new();
     let result = handler
-        .handle(&input_payload(), &ext_with_sub("bob"), &mut ctx)
+        .handle(&input_payload(), &ext_with_sub("bob", t), &mut ctx)
         .await;
     assert!(
         !result.is_denied(),
@@ -86,17 +110,11 @@ async fn under_budget_check_allows() {
 
 #[tokio::test]
 async fn over_budget_check_denies_with_quota_exhausted() {
-    let mut server = mockito::Server::new_async().await;
-    server
-        .mock("POST", "/check")
-        .with_status(429)
-        .create_async()
-        .await;
-
-    let handler = QuotaCheck::new(core(&server.url(), "allow"));
+    let t = Arc::new(FakeTransport::new().json("/check", 429, ""));
+    let handler = QuotaCheck::new(core("allow"));
     let mut ctx = PluginContext::new();
     let result = handler
-        .handle(&input_payload(), &ext_with_sub("bob"), &mut ctx)
+        .handle(&input_payload(), &ext_with_sub("bob", t), &mut ctx)
         .await;
     assert!(result.is_denied(), "an over-budget consumer must be denied");
     let violation = result.violation.expect("a denial carries a violation");
@@ -105,11 +123,15 @@ async fn over_budget_check_denies_with_quota_exhausted() {
 
 #[tokio::test]
 async fn unreachable_limitador_fails_open_when_on_error_allow() {
-    // Port 1 has nothing listening — the check call fails at transport.
-    let handler = QuotaCheck::new(core("http://127.0.0.1:1", "allow"));
+    // The transport reports a connect failure — the check call fails at
+    // transport, exactly as an unreachable Limitador would.
+    let t = Arc::new(
+        FakeTransport::new().fail("/check", HttpTransportError::Connect("refused".to_owned())),
+    );
+    let handler = QuotaCheck::new(core("allow"));
     let mut ctx = PluginContext::new();
     let result = handler
-        .handle(&input_payload(), &ext_with_sub("bob"), &mut ctx)
+        .handle(&input_payload(), &ext_with_sub("bob", t), &mut ctx)
         .await;
     assert!(
         !result.is_denied(),
@@ -119,10 +141,13 @@ async fn unreachable_limitador_fails_open_when_on_error_allow() {
 
 #[tokio::test]
 async fn unreachable_limitador_fails_closed_when_on_error_deny() {
-    let handler = QuotaCheck::new(core("http://127.0.0.1:1", "deny"));
+    let t = Arc::new(
+        FakeTransport::new().fail("/check", HttpTransportError::Connect("refused".to_owned())),
+    );
+    let handler = QuotaCheck::new(core("deny"));
     let mut ctx = PluginContext::new();
     let result = handler
-        .handle(&input_payload(), &ext_with_sub("bob"), &mut ctx)
+        .handle(&input_payload(), &ext_with_sub("bob", t), &mut ctx)
         .await;
     assert!(
         result.is_denied(),
@@ -133,161 +158,168 @@ async fn unreachable_limitador_fails_closed_when_on_error_deny() {
 }
 
 #[tokio::test]
-async fn report_debits_the_parsed_total() {
-    let mut server = mockito::Server::new_async().await;
-    let m = server
-        .mock("POST", "/report")
-        .match_body(mockito::Matcher::PartialJsonString(
-            r#"{"namespace":"grid-tokens","values":{"sub":"bob"},"delta":11}"#.to_owned(),
-        ))
-        .with_status(200)
-        .create_async()
-        .await;
+async fn withheld_perform_http_fails_closed_when_on_error_deny() {
+    // No `perform_http` grant. The check call cannot be made, and under the
+    // default posture that must refuse rather than serve unmetered.
+    let ext = Extensions {
+        security: Some(Arc::new(SecurityExtension {
+            subject: Some(SubjectExtension {
+                id: Some("bob".to_owned()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })),
+        http_transport: HttpTransportSlot::withheld(),
+        ..Default::default()
+    };
+    let handler = QuotaCheck::new(core("deny"));
+    let mut ctx = PluginContext::new();
+    let result = handler.handle(&input_payload(), &ext, &mut ctx).await;
+    assert!(
+        result.is_denied(),
+        "a withheld perform_http under on_error: deny must refuse"
+    );
+    let violation = result.violation.expect("a denial carries a violation");
+    assert_eq!(violation.code, "quota.backend_unavailable");
+}
 
-    let handler = QuotaReport::new(core(&server.url(), "allow"));
+#[tokio::test]
+async fn withheld_perform_http_fails_closed_even_when_on_error_allow() {
+    // A forgotten `perform_http` grant is a misconfiguration, not an
+    // unreachable Limitador, so it must NOT fall through `on_error: allow` and
+    // silently serve unmetered. This is the fail-open-on-misconfig guard.
+    let ext = Extensions {
+        security: Some(Arc::new(SecurityExtension {
+            subject: Some(SubjectExtension {
+                id: Some("bob".to_owned()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })),
+        http_transport: HttpTransportSlot::withheld(),
+        ..Default::default()
+    };
+    let handler = QuotaCheck::new(core("allow"));
+    let mut ctx = PluginContext::new();
+    let result = handler.handle(&input_payload(), &ext, &mut ctx).await;
+    assert!(
+        result.is_denied(),
+        "a withheld perform_http must deny even under on_error: allow"
+    );
+    let violation = result.violation.expect("a denial carries a violation");
+    assert_eq!(violation.code, "quota.backend_unavailable");
+}
+
+#[tokio::test]
+async fn report_debits_the_parsed_total() {
+    let t = Arc::new(FakeTransport::new().json("/report", 200, ""));
+    let handler = QuotaReport::new(core("allow"));
     let mut ctx = PluginContext::new();
     let body = r#"{"choices":[],"usage":{"prompt_tokens":5,"total_tokens":11}}"#;
     let result = handler
-        .handle(&output_payload(body), &ext_with_sub("bob"), &mut ctx)
+        .handle(
+            &output_payload(body),
+            &ext_with_sub("bob", as_transport(&t)),
+            &mut ctx,
+        )
         .await;
     assert!(!result.is_denied(), "the report hook never denies");
-    m.assert_async().await;
+    let sent =
+        String::from_utf8_lossy(&t.last_request().expect("a debit was posted").body).into_owned();
+    assert!(sent.contains(r#""delta":11"#), "{sent}");
+    assert!(sent.contains(r#""sub":"bob""#), "{sent}");
 }
 
 #[tokio::test]
 async fn report_debits_nothing_when_usage_absent() {
-    let mut server = mockito::Server::new_async().await;
-    // If the handler ever posts here, the expect(0) mock fails the test.
-    let m = server
-        .mock("POST", "/report")
-        .expect(0)
-        .create_async()
-        .await;
-
-    let handler = QuotaReport::new(core(&server.url(), "allow"));
+    let t = Arc::new(FakeTransport::new().json("/report", 200, ""));
+    let handler = QuotaReport::new(core("allow"));
     let mut ctx = PluginContext::new();
     // Streaming chunk with no usage object.
     let body = r#"{"choices":[{"delta":{"content":"hi"}}]}"#;
     let result = handler
-        .handle(&output_payload(body), &ext_with_sub("bob"), &mut ctx)
+        .handle(
+            &output_payload(body),
+            &ext_with_sub("bob", as_transport(&t)),
+            &mut ctx,
+        )
         .await;
     assert!(!result.is_denied(), "an absent total must never deny");
-    m.assert_async().await;
+    assert_eq!(t.call_count_for("/report"), 0, "no usage means no debit");
 }
 
 #[tokio::test]
 async fn report_never_denies_even_when_the_debit_fails() {
     // Limitador answers the debit with a 500. The response is already out,
     // so this must be swallowed, not turned into a denial.
-    let mut server = mockito::Server::new_async().await;
-    server
-        .mock("POST", "/report")
-        .with_status(500)
-        .create_async()
-        .await;
-
-    let handler = QuotaReport::new(core(&server.url(), "allow"));
+    let t = Arc::new(FakeTransport::new().json("/report", 500, ""));
+    let handler = QuotaReport::new(core("allow"));
     let mut ctx = PluginContext::new();
     let body = r#"{"usage":{"total_tokens":11}}"#;
     let result = handler
-        .handle(&output_payload(body), &ext_with_sub("bob"), &mut ctx)
+        .handle(&output_payload(body), &ext_with_sub("bob", t), &mut ctx)
         .await;
     assert!(!result.is_denied(), "a failed debit must never deny");
 }
 
-fn ext_with_sub_and_usage(sub: &str, total: u32) -> Extensions {
-    let mut ext = ext_with_sub(sub);
-    ext.completion = Some(Arc::new(CompletionExtension {
-        tokens: Some(TokenUsage {
-            total_tokens: total,
-            ..Default::default()
-        }),
-        ..Default::default()
-    }));
-    ext
-}
-
 #[tokio::test]
 async fn report_debits_the_typed_completion_usage() {
-    let mut server = mockito::Server::new_async().await;
-    let m = server
-        .mock("POST", "/report")
-        .match_body(mockito::Matcher::PartialJsonString(
-            r#"{"values":{"sub":"alice"},"delta":25}"#.to_owned(),
-        ))
-        .with_status(200)
-        .create_async()
-        .await;
-
-    let handler = QuotaReport::new(core(&server.url(), "allow"));
+    let t = Arc::new(FakeTransport::new().json("/report", 200, ""));
+    let handler = QuotaReport::new(core("allow"));
     let mut ctx = PluginContext::new();
     // Body carries no usage; the total must come from the typed slot.
     let result = handler
         .handle(
             &output_payload("done"),
-            &ext_with_sub_and_usage("alice", 25),
+            &ext_with_sub_and_usage("alice", 25, as_transport(&t)),
             &mut ctx,
         )
         .await;
     assert!(!result.is_denied());
-    m.assert_async().await;
+    let sent = String::from_utf8_lossy(&t.last_request().expect("a debit").body).into_owned();
+    assert!(sent.contains(r#""delta":25"#), "{sent}");
+    assert!(sent.contains(r#""sub":"alice""#), "{sent}");
 }
 
 #[tokio::test]
 async fn report_prefers_the_typed_usage_over_a_body_total() {
-    let mut server = mockito::Server::new_async().await;
-    let m = server
-        .mock("POST", "/report")
-        .match_body(mockito::Matcher::PartialJsonString(
-            r#"{"values":{"sub":"alice"},"delta":25}"#.to_owned(),
-        ))
-        .with_status(200)
-        .create_async()
-        .await;
-
-    let handler = QuotaReport::new(core(&server.url(), "allow"));
+    let t = Arc::new(FakeTransport::new().json("/report", 200, ""));
+    let handler = QuotaReport::new(core("allow"));
     let mut ctx = PluginContext::new();
     // A hostile body claiming a tiny cost must not win over the typed slot.
     let body = r#"{"usage":{"total_tokens":1}}"#;
     let result = handler
         .handle(
             &output_payload(body),
-            &ext_with_sub_and_usage("alice", 25),
+            &ext_with_sub_and_usage("alice", 25, as_transport(&t)),
             &mut ctx,
         )
         .await;
     assert!(!result.is_denied());
-    m.assert_async().await;
+    let sent = String::from_utf8_lossy(&t.last_request().expect("a debit").body).into_owned();
+    assert!(sent.contains(r#""delta":25"#), "{sent}");
 }
 
 #[tokio::test]
 async fn check_skips_limitador_without_a_resolved_identity() {
-    let mut server = mockito::Server::new_async().await;
-    let m = server.mock("POST", "/check").expect(0).create_async().await;
-
-    let handler = QuotaCheck::new(core(&server.url(), "allow"));
+    let t = Arc::new(FakeTransport::new().json("/check", 200, ""));
+    let ext = Extensions {
+        http_transport: HttpTransportSlot::installed(as_transport(&t)),
+        ..Default::default()
+    };
+    let handler = QuotaCheck::new(core("allow"));
     let mut ctx = PluginContext::new();
-    let result = handler
-        .handle(&input_payload(), &Extensions::default(), &mut ctx)
-        .await;
+    let result = handler.handle(&input_payload(), &ext, &mut ctx).await;
     assert!(
         !result.is_denied(),
         "no identity is skipped, not denied here"
     );
-    m.assert_async().await;
+    assert_eq!(t.call_count_for("/check"), 0, "no identity means no probe");
 }
 
 #[tokio::test]
 async fn report_skips_the_debit_without_a_resolved_identity() {
-    let mut server = mockito::Server::new_async().await;
-    let m = server
-        .mock("POST", "/report")
-        .expect(0)
-        .create_async()
-        .await;
-
-    let handler = QuotaReport::new(core(&server.url(), "allow"));
-    let mut ctx = PluginContext::new();
+    let t = Arc::new(FakeTransport::new().json("/report", 200, ""));
     let ext = Extensions {
         completion: Some(Arc::new(CompletionExtension {
             tokens: Some(TokenUsage {
@@ -296,84 +328,71 @@ async fn report_skips_the_debit_without_a_resolved_identity() {
             }),
             ..Default::default()
         })),
+        http_transport: HttpTransportSlot::installed(as_transport(&t)),
         ..Default::default()
     };
+    let handler = QuotaReport::new(core("allow"));
+    let mut ctx = PluginContext::new();
     let result = handler
         .handle(&output_payload("done"), &ext, &mut ctx)
         .await;
     assert!(!result.is_denied());
-    m.assert_async().await;
+    assert_eq!(t.call_count_for("/report"), 0, "no identity means no debit");
 }
 
 #[tokio::test]
 async fn report_refuses_a_fractional_body_total() {
-    let mut server = mockito::Server::new_async().await;
-    let m = server
-        .mock("POST", "/report")
-        .expect(0)
-        .create_async()
-        .await;
-
-    let handler = QuotaReport::new(core(&server.url(), "allow"));
+    let t = Arc::new(FakeTransport::new().json("/report", 200, ""));
+    let handler = QuotaReport::new(core("allow"));
     let mut ctx = PluginContext::new();
     // No typed slot; a fractional body total is not a token count.
     let body = r#"{"usage":{"total_tokens":1.5}}"#;
     let result = handler
-        .handle(&output_payload(body), &ext_with_sub("bob"), &mut ctx)
+        .handle(
+            &output_payload(body),
+            &ext_with_sub("bob", as_transport(&t)),
+            &mut ctx,
+        )
         .await;
     assert!(!result.is_denied());
-    m.assert_async().await;
+    assert_eq!(t.call_count_for("/report"), 0, "a float is not a debit");
 }
 
 #[tokio::test]
 async fn report_ignores_a_negative_body_total() {
-    let mut server = mockito::Server::new_async().await;
-    let m = server
-        .mock("POST", "/report")
-        .expect(0)
-        .create_async()
-        .await;
-
-    let handler = QuotaReport::new(core(&server.url(), "allow"));
+    let t = Arc::new(FakeTransport::new().json("/report", 200, ""));
+    let handler = QuotaReport::new(core("allow"));
     let mut ctx = PluginContext::new();
     let body = r#"{"usage":{"total_tokens":-5}}"#;
     let result = handler
-        .handle(&output_payload(body), &ext_with_sub("bob"), &mut ctx)
+        .handle(
+            &output_payload(body),
+            &ext_with_sub("bob", as_transport(&t)),
+            &mut ctx,
+        )
         .await;
     assert!(!result.is_denied());
-    m.assert_async().await;
+    assert_eq!(t.call_count_for("/report"), 0, "a negative is not a debit");
 }
 
 #[tokio::test]
 async fn check_fails_closed_on_a_server_error_under_on_error_deny() {
-    let mut server = mockito::Server::new_async().await;
-    server
-        .mock("POST", "/check")
-        .with_status(500)
-        .create_async()
-        .await;
-
-    let handler = QuotaCheck::new(core(&server.url(), "deny"));
+    let t = Arc::new(FakeTransport::new().json("/check", 500, ""));
+    let handler = QuotaCheck::new(core("deny"));
     let mut ctx = PluginContext::new();
     let result = handler
-        .handle(&input_payload(), &ext_with_sub("bob"), &mut ctx)
+        .handle(&input_payload(), &ext_with_sub("bob", t), &mut ctx)
         .await;
     assert!(result.is_denied(), "a 500 under on_error: deny must refuse");
 }
 
 #[tokio::test]
 async fn check_fails_open_on_a_server_error_under_on_error_allow() {
-    let mut server = mockito::Server::new_async().await;
-    server
-        .mock("POST", "/check")
-        .with_status(500)
-        .create_async()
-        .await;
-
-    let handler = QuotaCheck::new(core(&server.url(), "allow"));
+    let t = Arc::new(FakeTransport::new().json("/check", 500, ""));
+    let handler = QuotaCheck::new(core("allow"));
     let mut ctx = PluginContext::new();
     let result = handler
-        .handle(&input_payload(), &ext_with_sub("bob"), &mut ctx)
+        .handle(&input_payload(), &ext_with_sub("bob", t), &mut ctx)
         .await;
     assert!(
         !result.is_denied(),
@@ -381,55 +400,54 @@ async fn check_fails_open_on_a_server_error_under_on_error_allow() {
     );
 }
 
-/// A stateful mock Limitador that models the real counter: `/check` with the
-/// plugin's probe delta of 1 refuses once the counter reaches `max`, and
-/// `/report` increments unconditionally. This is what a fixed-response mock
-/// cannot express, and it is what proves the debit path accumulates.
-async fn start_stateful_limitador(max: u64) -> String {
-    use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
-    use std::sync::Mutex;
+/// A stateful in-process transport that models the real Limitador counter:
+/// `/check` with the plugin's probe delta of 1 refuses once the counter would
+/// exceed `max`, and `/report` increments unconditionally. This is what a
+/// fixed-response script cannot express, and it is what proves the debit path
+/// accumulates.
+#[derive(Debug)]
+struct CountingLimitador {
+    counter: Mutex<u64>,
+    max: u64,
+}
 
-    #[derive(Clone)]
-    struct Lim {
-        counter: Arc<Mutex<u64>>,
-        max: u64,
-    }
-
-    fn delta(b: &serde_json::Value) -> u64 {
-        b.get("delta")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0)
-    }
-
-    async fn check(State(s): State<Lim>, Json(b): Json<serde_json::Value>) -> StatusCode {
-        let over = *s.counter.lock().expect("counter lock") + delta(&b) > s.max;
-        if over {
-            StatusCode::TOO_MANY_REQUESTS
-        } else {
-            StatusCode::OK
+impl CountingLimitador {
+    fn new(max: u64) -> Self {
+        Self {
+            counter: Mutex::new(0),
+            max,
         }
     }
 
-    async fn report(State(s): State<Lim>, Json(b): Json<serde_json::Value>) -> StatusCode {
-        *s.counter.lock().expect("counter lock") += delta(&b);
-        StatusCode::OK
+    fn delta(body: &Bytes) -> u64 {
+        serde_json::from_slice::<serde_json::Value>(body)
+            .ok()
+            .and_then(|v| v.get("delta").and_then(serde_json::Value::as_u64))
+            .unwrap_or(0)
     }
+}
 
-    let app = Router::new()
-        .route("/check", post(check))
-        .route("/report", post(report))
-        .with_state(Lim {
-            counter: Arc::new(Mutex::new(0)),
-            max,
-        });
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("serve");
-    });
-    format!("http://{addr}")
+#[async_trait::async_trait]
+impl HttpTransport for CountingLimitador {
+    async fn execute(&self, req: HttpRequest) -> Result<HttpResponse, HttpTransportError> {
+        let delta = Self::delta(&req.body);
+        // No await while the guard is held: compute the status, then answer.
+        let status = {
+            let mut counter = self
+                .counter
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if req.url.contains("/report") {
+                *counter += delta;
+                200
+            } else if *counter + delta > self.max {
+                429
+            } else {
+                200
+            }
+        };
+        Ok(HttpResponse::new(status, Bytes::new()))
+    }
 }
 
 #[tokio::test]
@@ -438,20 +456,24 @@ async fn a_principal_is_denied_once_cumulative_debits_reach_the_budget() {
     // debit, so counters 0, 40, 80 all admit. The debits carry the counter
     // to 120, and the fourth check refuses. This drives the whole loop the
     // plugin exists to close, against a Limitador that counts.
-    let url = start_stateful_limitador(100).await;
-    let check = QuotaCheck::new(core(&url, "deny"));
-    let report = QuotaReport::new(core(&url, "deny"));
+    let t: Arc<dyn HttpTransport> = Arc::new(CountingLimitador::new(100));
+    let check = QuotaCheck::new(core("deny"));
+    let report = QuotaReport::new(core("deny"));
     let mut ctx = PluginContext::new();
 
     for round in 0..3 {
         let admitted = check
-            .handle(&input_payload(), &ext_with_sub("bob"), &mut ctx)
+            .handle(
+                &input_payload(),
+                &ext_with_sub("bob", Arc::clone(&t)),
+                &mut ctx,
+            )
             .await;
         assert!(!admitted.is_denied(), "round {round} must be admitted");
         let debit = report
             .handle(
                 &output_payload("done"),
-                &ext_with_sub_and_usage("bob", 40),
+                &ext_with_sub_and_usage("bob", 40, Arc::clone(&t)),
                 &mut ctx,
             )
             .await;
@@ -459,7 +481,11 @@ async fn a_principal_is_denied_once_cumulative_debits_reach_the_budget() {
     }
 
     let denied = check
-        .handle(&input_payload(), &ext_with_sub("bob"), &mut ctx)
+        .handle(
+            &input_payload(),
+            &ext_with_sub("bob", Arc::clone(&t)),
+            &mut ctx,
+        )
         .await;
     assert!(denied.is_denied(), "a principal over budget must be denied");
     let violation = denied.violation.expect("a denial carries a violation");
