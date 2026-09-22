@@ -322,7 +322,9 @@ async fn report_prefers_the_typed_usage_over_a_body_total() {
 }
 
 #[tokio::test]
-async fn check_skips_limitador_without_a_resolved_identity() {
+async fn check_denies_without_a_resolved_identity_by_default() {
+    // Nothing to meter, and fail-open would let a dropped identity claim dodge
+    // the budget, so the default denies before probing Limitador.
     let t = Arc::new(FakeTransport::new().json("/check", 200, ""));
     let ext = Extensions {
         http_transport: HttpTransportSlot::installed(as_transport(&t)),
@@ -331,9 +333,37 @@ async fn check_skips_limitador_without_a_resolved_identity() {
     let handler = QuotaCheck::new(core("allow"));
     let mut ctx = PluginContext::new();
     let result = handler.handle(&input_payload(), &ext, &mut ctx).await;
+    assert!(result.is_denied(), "no identity must deny by default");
+    let violation = result.violation.expect("a denial carries a violation");
+    assert_eq!(violation.code, "quota.no_identity");
+    assert_eq!(t.call_count_for("/check"), 0, "no identity means no probe");
+}
+
+#[tokio::test]
+async fn check_allows_without_identity_when_allow_unauthenticated() {
+    // The explicit opt-in for deployments that gate auth upstream: no identity
+    // then serves unmetered, and still never probes Limitador.
+    let t = Arc::new(FakeTransport::new().json("/check", 200, ""));
+    let ext = Extensions {
+        http_transport: HttpTransportSlot::installed(as_transport(&t)),
+        ..Default::default()
+    };
+    let cfg = PluginConfig {
+        name: "token-quota".into(),
+        kind: KIND.into(),
+        config: Some(json!({
+            "endpoint": "http://limitador.test",
+            "namespace": "grid-tokens",
+            "allow_unauthenticated": true,
+        })),
+        ..Default::default()
+    };
+    let handler = QuotaCheck::new(Arc::new(Quota::new(cfg).expect("core builds")));
+    let mut ctx = PluginContext::new();
+    let result = handler.handle(&input_payload(), &ext, &mut ctx).await;
     assert!(
         !result.is_denied(),
-        "no identity is skipped, not denied here"
+        "allow_unauthenticated must serve a no-identity request"
     );
     assert_eq!(t.call_count_for("/check"), 0, "no identity means no probe");
 }

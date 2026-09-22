@@ -26,6 +26,11 @@ pub struct QuotaConfig {
 
     /// Which resolved-identity value keys the budget, and the Limitador
     /// descriptor key. Default `sub` reads the authenticated subject id.
+    ///
+    /// Must name a claim the gateway verifies and that is always present on an
+    /// authenticated request. `sub` is the only safe default: a client-supplied
+    /// claim can be dropped or forged to dodge metering, so keying the budget on
+    /// one is a bypass.
     #[serde(default = "default_identity_claim")]
     pub identity_claim: String,
 
@@ -45,6 +50,15 @@ pub struct QuotaConfig {
     /// the `on_error` path rather than stalling the request. Default 5.
     #[serde(default = "default_timeout_seconds")]
     pub timeout_seconds: u64,
+
+    /// Whether to serve a request that carries no resolved identity. Default
+    /// false: with nothing to meter, the request is denied (fail closed),
+    /// matching the posture for a missing backend, so a dropped identity claim
+    /// cannot dodge the budget. Set true only when authentication is enforced
+    /// upstream and an unauthenticated request should pass unmetered by design;
+    /// every such request then logs a warning.
+    #[serde(default)]
+    pub allow_unauthenticated: bool,
 }
 
 /// How the plugin reacts when a Limitador call cannot be completed.
@@ -110,6 +124,10 @@ mod tests {
         assert_eq!(cfg.usage_json_path, "usage.total_tokens");
         assert_eq!(cfg.on_error, OnErrorMode::Deny);
         assert_eq!(cfg.timeout_seconds, 5);
+        assert!(
+            !cfg.allow_unauthenticated,
+            "a request with no identity must fail closed by default"
+        );
     }
 
     #[test]
@@ -121,12 +139,14 @@ mod tests {
             "on_error": "deny",
             "usage_json_path": "usage/total_tokens",
             "timeout_seconds": 2,
+            "allow_unauthenticated": true,
         }))
         .unwrap();
         assert_eq!(cfg.identity_claim, "tenant");
         assert_eq!(cfg.on_error, OnErrorMode::Deny);
         assert_eq!(cfg.usage_json_path, "usage/total_tokens");
         assert_eq!(cfg.timeout_seconds, 2);
+        assert!(cfg.allow_unauthenticated);
     }
 
     #[test]
@@ -151,6 +171,7 @@ mod tests {
             on_error: OnErrorMode::Allow,
             usage_json_path: default_usage_json_path(),
             timeout_seconds: 5,
+            allow_unauthenticated: false,
         };
         let err = cfg.validate().unwrap_err();
         assert!(err.contains("endpoint"), "{err}");
@@ -165,6 +186,7 @@ mod tests {
             on_error: OnErrorMode::Allow,
             usage_json_path: default_usage_json_path(),
             timeout_seconds: 5,
+            allow_unauthenticated: false,
         };
         let err = cfg.validate().unwrap_err();
         assert!(err.contains("namespace"), "{err}");

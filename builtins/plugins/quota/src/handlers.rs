@@ -28,6 +28,9 @@ pub const CODE_QUOTA_BACKEND_UNAVAILABLE: &str = "quota.backend_unavailable";
 /// the operator looks at egress config, not at a healthy Limitador.
 pub const CODE_QUOTA_EGRESS_DENIED: &str = "quota.egress_denied";
 
+/// Fail-closed denial when a request carries no resolved identity to meter and
+/// `allow_unauthenticated` is not set.
+pub const CODE_QUOTA_NO_IDENTITY: &str = "quota.no_identity";
 
 /// HTTP 429, set as the violation's `proto_error_code` for an over-budget denial.
 const HTTP_TOO_MANY_REQUESTS: i64 = 429;
@@ -126,13 +129,27 @@ impl HookHandler<CmfHook> for QuotaCheck {
     ) -> PluginResult<MessagePayload> {
         let claim = &self.core.typed.identity_claim;
         let Some(sub) = resolve_identity(extensions, claim) else {
-            // No identity to key on. Authentication is gated upstream, so
-            // allow rather than deny.
-            tracing::debug!(
+            // Nothing to meter. Failing open here would let a dropped identity
+            // claim dodge the budget, so deny by default and match the
+            // never-serve-unmetered posture. An operator that gates auth
+            // upstream opts into serving with `allow_unauthenticated`.
+            if self.core.typed.allow_unauthenticated {
+                tracing::warn!(
+                    claim = claim.as_str(),
+                    "quota: no resolved identity on llm_input; allow_unauthenticated is set, \
+                     serving UNMETERED"
+                );
+                return PluginResult::allow();
+            }
+            tracing::error!(
                 claim = claim.as_str(),
-                "quota: no resolved identity on llm_input; skipping quota check"
+                "quota: no resolved identity on llm_input; denying (set allow_unauthenticated \
+                 to serve unmetered when auth is gated upstream)"
             );
-            return PluginResult::allow();
+            return PluginResult::deny(PluginViolation::new(
+                CODE_QUOTA_NO_IDENTITY,
+                "no resolved identity to meter",
+            ));
         };
 
         match self.core.backend.check(extensions, claim, &sub).await {

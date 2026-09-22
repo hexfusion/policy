@@ -8,17 +8,19 @@
 //       - name: token-quota
 //         kind: quota
 //         hooks: [cmf.llm_input, cmf.llm_output]
-//         # read_subject/read_claims: without these the identity is filtered
-//         # to None and nothing meters. perform_http: the check and debit are
-//         # outbound calls through the host transport; withholding it fails the
-//         # call, so `on_error` governs (deny = fail closed).
+//         # All three are required. read_subject/read_claims: without them the
+//         # identity is filtered to None, which now denies (see
+//         # allow_unauthenticated). perform_http: the check and debit are
+//         # outbound calls through the host transport; withholding it denies
+//         # every metered request, regardless of on_error.
 //         capabilities: [read_subject, read_claims, perform_http]
 //         config:
 //           endpoint: http://limitador.grid-system.svc:8080
 //           namespace: grid-tokens
-//           identity_claim: sub
-//           on_error: deny          # fail closed (the default)
+//           identity_claim: sub      # must be a verified, always-present claim
+//           on_error: deny           # transport failures fail closed (the default)
 //           usage_json_path: usage.total_tokens
+//           allow_unauthenticated: false  # a request with no identity denies (the default)
 //
 // The two hook points are registered from code, so the operator's `hooks:`
 // list is documentation, not a lever.
@@ -26,8 +28,9 @@
 // Deployment note: the check and debit run through the host HTTP transport,
 // which enforces the host's egress policy. Limitador is usually an in-cluster
 // Service on a private (RFC 1918) ClusterIP, and a transport that blocks
-// private destinations by default refuses every call. Ensure the host
-// transport permits the Limitador address, or those calls fail into `on_error`.
+// private destinations by default refuses every call, which denies with
+// `quota.egress_denied`. Ensure the host transport permits the Limitador
+// address.
 
 use std::sync::Arc;
 
