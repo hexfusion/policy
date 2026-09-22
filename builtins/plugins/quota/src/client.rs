@@ -19,6 +19,7 @@ use praxis_policy_core::http_retry::RetryPolicy;
 use serde_json::json;
 
 use praxis_policy_core::host::HttpRequestError;
+use praxis_policy_core::http::HttpTransportError;
 
 use crate::backend::{BackendError, BackendErrorKind, CheckOutcome, QuotaBackend};
 
@@ -75,24 +76,49 @@ impl LimitadorClient {
                 message: format!("Limitador request to {url} could not be built: {e}"),
                 kind: BackendErrorKind::Unavailable,
             })?;
-        // One attempt per call: `/report` increments unconditionally, so a
-        // repeated POST double-charges, and `/check` shares the posture.
+        // One attempt per call. `/report` increments unconditionally, so a
+        // repeated POST would double-charge; `/check` only probes (delta=1,
+        // charges nothing), but retrying it on the admission hot path adds tail
+        // latency for no correctness gain. So neither call retries.
         ext.http_request(request, RetryPolicy::none())
             .await
             .map(|response| response.status)
-            .map_err(|e| {
-                // A withheld `perform_http` or an uninstalled transport is a
-                // permanent misconfiguration, not an unreachable Limitador, so
-                // it must not fall through `on_error`.
-                let kind = match &e {
-                    HttpRequestError::Unavailable(_) => BackendErrorKind::Unavailable,
-                    HttpRequestError::Transport(_) => BackendErrorKind::Transport,
-                };
-                BackendError {
-                    message: format!("Limitador POST {url} failed: {e}"),
-                    kind,
-                }
+            .map_err(|e| BackendError {
+                message: format!("Limitador POST {url} failed: {e}"),
+                kind: classify(&e),
             })
+    }
+}
+
+/// Sort a failed host call into a [`BackendErrorKind`].
+///
+/// The distinction the handler acts on is "does `on_error` apply?" Only a
+/// genuine transient failure to a reachable-or-maybe-reachable peer (timeout,
+/// refused connection, dropped socket, oversize response) does. A withheld
+/// capability, an uninstalled transport, or a request the host refused to send
+/// never reached Limitador and no retry fixes it, so those fail closed
+/// regardless of `on_error`. `Rejected` is called out on its own so the denial
+/// names egress.
+///
+/// The transient set is enumerated rather than caught with a wildcard:
+/// [`HttpTransportError`] is `#[non_exhaustive]`, so a future variant this
+/// crate has not seen falls to the final arm and fails closed, never serving
+/// unmetered under `on_error: allow` on a failure whose meaning is unknown.
+fn classify(err: &HttpRequestError) -> BackendErrorKind {
+    match err {
+        HttpRequestError::Unavailable(_) => BackendErrorKind::Unavailable,
+        HttpRequestError::Transport(HttpTransportError::Rejected(_)) => {
+            BackendErrorKind::EgressDenied
+        },
+        HttpRequestError::Transport(
+            HttpTransportError::Timeout
+            | HttpTransportError::Connect(_)
+            | HttpTransportError::Io(_)
+            | HttpTransportError::ResponseTooLarge { .. },
+        ) => BackendErrorKind::Transport,
+        // A malformed request (permanent local fault) and any variant this
+        // crate does not yet model both fail closed.
+        HttpRequestError::Transport(_) => BackendErrorKind::Unavailable,
     }
 }
 
@@ -151,7 +177,7 @@ mod tests {
     use std::time::Duration;
 
     use praxis_policy_core::host::HttpTransportSlot;
-    use praxis_policy_core::http::{HttpTransport, HttpTransportError};
+    use praxis_policy_core::http::HttpTransport;
     use praxis_policy_core::http_testing::FakeTransport;
 
     fn client() -> LimitadorClient {
@@ -269,6 +295,37 @@ mod tests {
         assert!(err.message.contains("perform_http"), "{}", err.message);
         // A withheld capability is a permanent misconfiguration: on_error must
         // not apply, so the kind is Unavailable, not Transport.
+        assert_eq!(err.kind, BackendErrorKind::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn an_egress_denied_call_is_classified_distinctly() {
+        // The host refusing the call (egress policy / SSRF guard) never reaches
+        // Limitador, so it must fail closed like a withheld capability, but with
+        // its own kind so the denial can name egress rather than the backend.
+        let t = Arc::new(
+            FakeTransport::new().fail("/check", HttpTransportError::Rejected("egress".to_owned())),
+        );
+        let err = client()
+            .check(&ext_with(&t), "sub", "bob")
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, BackendErrorKind::EgressDenied);
+    }
+
+    #[tokio::test]
+    async fn a_malformed_request_fails_closed() {
+        // InvalidRequest is a permanent local fault, not a transient peer
+        // problem, so it classifies as Unavailable (fail closed), never
+        // Transport, and never rides on_error.
+        let t = Arc::new(FakeTransport::new().fail(
+            "/check",
+            HttpTransportError::InvalidRequest("bad".to_owned()),
+        ));
+        let err = client()
+            .check(&ext_with(&t), "sub", "bob")
+            .await
+            .unwrap_err();
         assert_eq!(err.kind, BackendErrorKind::Unavailable);
     }
 }

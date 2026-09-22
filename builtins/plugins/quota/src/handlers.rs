@@ -23,6 +23,12 @@ pub const CODE_QUOTA_EXHAUSTED: &str = "quota.exhausted";
 /// Fail-closed denial when the backend is unreachable under `on_error: deny`.
 pub const CODE_QUOTA_BACKEND_UNAVAILABLE: &str = "quota.backend_unavailable";
 
+/// Fail-closed denial when the host refused to send the Limitador call (egress
+/// policy, SSRF guard, open circuit). Distinct from `backend_unavailable` so
+/// the operator looks at egress config, not at a healthy Limitador.
+pub const CODE_QUOTA_EGRESS_DENIED: &str = "quota.egress_denied";
+
+
 /// HTTP 429, set as the violation's `proto_error_code` for an over-budget denial.
 const HTTP_TOO_MANY_REQUESTS: i64 = 429;
 
@@ -136,37 +142,49 @@ impl HookHandler<CmfHook> for QuotaCheck {
                     // Exhausted budget is HTTP 429.
                     .with_proto_error_code(HTTP_TOO_MANY_REQUESTS),
             ),
-            Err(e) => {
-                let deny = || {
+            Err(e) => match e.kind {
+                // A misconfigured plugin (no transport, or `perform_http`
+                // withheld) is not an unreachable Limitador, so `on_error`
+                // does not apply: never serve unmetered on a wiring fault.
+                BackendErrorKind::Unavailable => {
+                    tracing::error!(
+                        error = %e,
+                        "quota: check cannot run (transport unavailable or \
+                         perform_http withheld); denying regardless of on_error"
+                    );
                     PluginResult::deny(PluginViolation::new(
                         CODE_QUOTA_BACKEND_UNAVAILABLE,
                         "token budget backend unavailable",
                     ))
-                };
-                match e.kind {
-                    // A misconfigured plugin (no transport, or `perform_http`
-                    // withheld) is not an unreachable Limitador, so `on_error`
-                    // does not apply: never serve unmetered on a wiring fault.
-                    BackendErrorKind::Unavailable => {
-                        tracing::error!(
-                            error = %e,
-                            "quota: check cannot run (transport unavailable or \
-                             perform_http withheld); denying regardless of on_error"
-                        );
-                        deny()
-                    },
-                    BackendErrorKind::Transport => {
-                        tracing::warn!(
-                            error = %e,
-                            on_error = ?self.core.typed.on_error,
-                            "quota: check call failed; applying on_error posture"
-                        );
-                        match self.core.typed.on_error {
-                            OnErrorMode::Allow => PluginResult::allow(),
-                            OnErrorMode::Deny => deny(),
-                        }
-                    },
-                }
+                },
+                // The host refused to send the call. Also permanent, and
+                // named distinctly so the operator checks egress, not a
+                // Limitador that is actually healthy.
+                BackendErrorKind::EgressDenied => {
+                    tracing::error!(
+                        error = %e,
+                        "quota: check refused by host egress before reaching Limitador; \
+                         denying regardless of on_error"
+                    );
+                    PluginResult::deny(PluginViolation::new(
+                        CODE_QUOTA_EGRESS_DENIED,
+                        "token budget check refused by host egress policy",
+                    ))
+                },
+                BackendErrorKind::Transport => {
+                    tracing::warn!(
+                        error = %e,
+                        on_error = ?self.core.typed.on_error,
+                        "quota: check call failed; applying on_error posture"
+                    );
+                    match self.core.typed.on_error {
+                        OnErrorMode::Allow => PluginResult::allow(),
+                        OnErrorMode::Deny => PluginResult::deny(PluginViolation::new(
+                            CODE_QUOTA_BACKEND_UNAVAILABLE,
+                            "token budget backend unavailable",
+                        )),
+                    }
+                },
             },
         }
     }

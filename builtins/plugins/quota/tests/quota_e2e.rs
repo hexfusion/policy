@@ -211,6 +211,27 @@ async fn withheld_perform_http_fails_closed_even_when_on_error_allow() {
 }
 
 #[tokio::test]
+async fn egress_denied_fails_closed_even_when_on_error_allow() {
+    // The host refusing the call (egress policy for the in-cluster Limitador
+    // ClusterIP) never reached the peer, so it must NOT fall through
+    // on_error: allow and serve unmetered. It denies with its own code.
+    let t = Arc::new(
+        FakeTransport::new().fail("/check", HttpTransportError::Rejected("egress".to_owned())),
+    );
+    let handler = QuotaCheck::new(core("allow"));
+    let mut ctx = PluginContext::new();
+    let result = handler
+        .handle(&input_payload(), &ext_with_sub("bob", t), &mut ctx)
+        .await;
+    assert!(
+        result.is_denied(),
+        "an egress-denied call must deny even under on_error: allow"
+    );
+    let violation = result.violation.expect("a denial carries a violation");
+    assert_eq!(violation.code, "quota.egress_denied");
+}
+
+#[tokio::test]
 async fn report_debits_the_parsed_total() {
     let t = Arc::new(FakeTransport::new().json("/report", 200, ""));
     let handler = QuotaReport::new(core("allow"));

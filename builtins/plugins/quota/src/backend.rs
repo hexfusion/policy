@@ -21,8 +21,8 @@ pub enum CheckOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendErrorKind {
     /// A transient failure reaching the backend: a timeout, a refused
-    /// connection, or an unrecognized status. The caller's `on_error`
-    /// posture governs it.
+    /// connection, a dropped socket, or an unrecognized status. The peer may
+    /// recover, so the caller's `on_error` posture governs it.
     Transport,
     /// A permanent fault that no retry or backend recovery fixes: no host
     /// transport is installed, the plugin lacks the `perform_http` capability,
@@ -30,6 +30,12 @@ pub enum BackendErrorKind {
     /// because it governs an unreachable Limitador, not a misconfigured plugin;
     /// the caller must never serve unmetered on it.
     Unavailable,
+    /// The host refused to send the request at all: an egress policy, an SSRF
+    /// guard, or an open circuit. Never reached the peer, and no retry helps,
+    /// so like [`Self::Unavailable`] it fails closed regardless of `on_error`;
+    /// kept distinct so the denial points an operator at egress config rather
+    /// than at a Limitador that is actually healthy.
+    EgressDenied,
 }
 
 /// A backend call that failed or answered unrecognizably. Distinct from an
