@@ -264,8 +264,8 @@ async fn past_the_staleness_ceiling_a_lookup_reports_a_directory_failure() {
 fn a_ceiling_below_the_interval_fails_at_config_load() {
     let file = RecordFile::write("keys: []\n");
     let mut config = file_config(file.path(), None);
-    config["directory"]["refresh_secs"] = serde_json::json!(60);
-    config["directory"]["max_staleness_secs"] = serde_json::json!(30);
+    config["provider"]["refresh_secs"] = serde_json::json!(60);
+    config["provider"]["max_staleness_secs"] = serde_json::json!(30);
 
     let error = resolver(config).expect_err("an incoherent pair must not build");
 
@@ -280,7 +280,7 @@ fn a_ceiling_below_the_interval_fails_at_config_load() {
 fn a_ceiling_without_an_interval_fails_at_config_load() {
     let file = RecordFile::write("keys: []\n");
     let mut config = file_config(file.path(), None);
-    config["directory"]["max_staleness_secs"] = serde_json::json!(30);
+    config["provider"]["max_staleness_secs"] = serde_json::json!(30);
 
     let error = resolver(config).expect_err("a ceiling with no interval must not build");
 

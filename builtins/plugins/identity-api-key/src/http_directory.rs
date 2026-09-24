@@ -44,7 +44,7 @@ use serde_json::Value;
 
 use crate::directory::{DirectoryError, KeyDirectory, KeyRecord, PresentedKey};
 
-/// The `kind:` string an operator writes under `directory:`.
+/// The `kind:` string an operator writes under `provider:`.
 pub const KIND: &str = "http";
 
 /// A ceiling on the response body a lookup will buffer.

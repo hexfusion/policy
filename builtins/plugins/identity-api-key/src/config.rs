@@ -20,7 +20,7 @@ use crate::http_directory::HttpDirectoryConfig;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
-pub enum DirectoryConfig {
+pub enum ProviderConfig {
     /// Records in a file, indexed by digest.
     File(FileDirectoryConfig),
     /// Records held by a service, reached over HTTP.
@@ -75,7 +75,7 @@ pub struct ApiKeyResolverConfig {
     pub prefix: Option<String>,
 
     /// Where the records live.
-    pub directory: DirectoryConfig,
+    pub provider: ProviderConfig,
 
     /// Record fields onto the identity slots.
     #[serde(default)]
@@ -146,7 +146,7 @@ impl ApiKeyResolverConfig {
             )
         })?;
         if self.expiry == ExpiryPolicy::Directory
-            && matches!(self.directory, DirectoryConfig::File(_))
+            && matches!(self.provider, ProviderConfig::File(_))
         {
             return Err(
                 "`expiry: directory` requires a directory that enforces expiry; the file backend does not"
@@ -161,9 +161,9 @@ impl ApiKeyResolverConfig {
         // out `refresh_secs` and then `cache.ttl_secs`. Refused rather than
         // quietly honoured, because an operator who wrote it believes they
         // configured one window.
-        if self.cache.is_some() && matches!(self.directory, DirectoryConfig::File(_)) {
+        if self.cache.is_some() && matches!(self.provider, ProviderConfig::File(_)) {
             return Err(
-                "`cache:` with `directory.kind: file` gives two revocation windows for one \
+                "`cache:` with `provider.kind: file` gives two revocation windows for one \
                  property: the file backend is already an index, and `refresh_secs` is its \
                  window. Remove the `cache:` block"
                     .to_owned(),

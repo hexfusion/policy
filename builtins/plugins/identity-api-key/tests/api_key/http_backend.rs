@@ -268,7 +268,7 @@ async fn the_resolver_projects_an_http_answer_onto_the_subject() {
     let resolver = crate::support::resolver(serde_json::json!({
         "credential": { "kind": "header", "name": "Authorization" },
         "prefix": "Bearer sk-oai-",
-        "directory": { "kind": "http", "url": URL },
+        "provider": { "kind": "http", "url": URL },
         "record_map": { "subject": { "id": "username", "roles": "groups" } },
         "claims": { "include": ["subscription", "tenant"] },
     }))
@@ -309,7 +309,7 @@ async fn the_resolver_projects_an_http_answer_onto_the_subject() {
 async fn a_directory_failure_denies_differently_from_an_unknown_key() {
     let resolver = crate::support::resolver(serde_json::json!({
         "credential": { "kind": "header", "name": "Authorization" },
-        "directory": { "kind": "http", "url": URL },
+        "provider": { "kind": "http", "url": URL },
         "record_map": { "subject": { "id": "username" } },
     }))
     .expect("the config builds");

@@ -58,7 +58,7 @@ pub mod record_map;
 pub mod resolver;
 
 pub use cache::{CacheConfig, CachingDirectory};
-pub use config::{ApiKeyResolverConfig, DirectoryConfig, ExpiryPolicy, OnDirectoryError};
+pub use config::{ApiKeyResolverConfig, ExpiryPolicy, OnDirectoryError, ProviderConfig};
 pub use credential::{Credential, CredentialLocation, Extraction};
 pub use directory::{DirectoryError, KeyDirectory, KeyRecord, PresentedKey};
 pub use factory::{ApiKeyIdentityFactory, KIND};

@@ -15,7 +15,7 @@
 //             kind: header
 //             name: Authorization
 //           prefix: "Bearer sk-oai-"
-//           directory:
+//           provider:
 //             kind: file
 //             path: /etc/ppe/keys.yaml
 //             index: sha256

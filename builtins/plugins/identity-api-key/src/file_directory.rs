@@ -28,7 +28,7 @@ use praxis_policy_core::host::HostServices;
 
 use crate::directory::{DirectoryError, KeyDirectory, KeyRecord, PresentedKey};
 
-/// The `kind:` string an operator writes under `directory:`.
+/// The `kind:` string an operator writes under `provider:`.
 pub const KIND: &str = "file";
 
 /// Field names the backend consumes, which never reach a projected record.

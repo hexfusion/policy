@@ -21,7 +21,7 @@ use praxis_policy_core::identity::{IdentityHook, IdentityPayload};
 use praxis_policy_core::plugin::{OnError, Plugin, PluginConfig, PluginMode};
 
 use crate::cache::CachingDirectory;
-use crate::config::{ApiKeyResolverConfig, DirectoryConfig, ExpiryPolicy};
+use crate::config::{ApiKeyResolverConfig, ExpiryPolicy, ProviderConfig};
 use crate::credential::{CredentialLocation, Extraction};
 use crate::directory::KeyDirectory;
 use crate::file_directory::FileDirectory;
@@ -98,13 +98,13 @@ impl ApiKeyIdentityResolver {
             message: format!("{}: {e}", config.name),
         })?;
 
-        let directory: Arc<dyn KeyDirectory> = match &settings.directory {
-            DirectoryConfig::File(file) => Arc::new(FileDirectory::new(file.clone()).map_err(
+        let directory: Arc<dyn KeyDirectory> = match &settings.provider {
+            ProviderConfig::File(file) => Arc::new(FileDirectory::new(file.clone()).map_err(
                 |e| PluginError::Config {
                     message: format!("{}: {e}", config.name),
                 },
             )?),
-            DirectoryConfig::Http(http) => Arc::new(HttpDirectory::new(http.clone()).map_err(
+            ProviderConfig::Http(http) => Arc::new(HttpDirectory::new(http.clone()).map_err(
                 |e| PluginError::Config {
                     message: format!("{}: {e}", config.name),
                 },

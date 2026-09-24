@@ -58,7 +58,7 @@ fn a_config_fault_fails_the_factory_rather_than_the_first_request() {
     bad_role["role"] = serde_json::Value::String("client".to_owned());
 
     let mut bad_url = file_config(file.path(), None);
-    bad_url["directory"] = serde_json::json!({ "kind": "http", "url": "not-a-url" });
+    bad_url["provider"] = serde_json::json!({ "kind": "http", "url": "not-a-url" });
 
     for faulty in [
         serde_json::json!({}),
@@ -69,7 +69,7 @@ fn a_config_fault_fails_the_factory_rather_than_the_first_request() {
         // catches only because the variant is its own struct.
         serde_json::json!({
             "credential": { "kind": "header", "name": "Authorization" },
-            "directory": { "kind": "file", "path": "/tmp/x", "timeout_secs": 5 },
+            "provider": { "kind": "file", "path": "/tmp/x", "timeout_secs": 5 },
         }),
     ] {
         // `.err()`: `PluginInstance` is not `Debug`.

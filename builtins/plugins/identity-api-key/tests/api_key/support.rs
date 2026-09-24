@@ -84,7 +84,7 @@ pub fn resolver(block: serde_json::Value) -> Result<ApiKeyIdentityResolver, Stri
 pub fn file_config(path: &str, prefix: Option<&str>) -> serde_json::Value {
     let mut block = serde_json::json!({
         "credential": { "kind": "header", "name": "Authorization" },
-        "directory": { "kind": "file", "path": path },
+        "provider": { "kind": "file", "path": path },
         "record_map": { "subject": { "id": "user", "roles": "groups" } },
     });
     if let Some(prefix) = prefix {
