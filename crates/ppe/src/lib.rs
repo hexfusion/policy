@@ -121,26 +121,32 @@ pub use praxis_policy_core::prelude;
 
 // Concrete factory types + KIND consts, each behind its feature.
 #[cfg(feature = "cedar")]
-pub use praxis_policy_pdp_cedar_direct::CedarDirectPdpFactory;
+pub use praxis_policy_builtins::pdps::cedar_direct::CedarDirectPdpFactory;
 #[cfg(feature = "cel")]
-pub use praxis_policy_pdp_cel::CelPdpFactory;
+pub use praxis_policy_builtins::pdps::cel::CelPdpFactory;
 #[cfg(feature = "opa")]
-pub use praxis_policy_pdp_opa::OpaPdpFactory;
+pub use praxis_policy_builtins::pdps::opa::OpaPdpFactory;
 #[cfg(feature = "oauth")]
-pub use praxis_policy_plugin_delegator_oauth::{KIND as OAUTH_KIND, OAuthDelegatorFactory};
+pub use praxis_policy_builtins::plugins::delegator_oauth::{
+    KIND as OAUTH_KIND, OAuthDelegatorFactory,
+};
 #[cfg(feature = "elicitation-ciba")]
-pub use praxis_policy_plugin_elicitation_ciba::{CibaApproverFactory, KIND as CIBA_KIND};
+pub use praxis_policy_builtins::plugins::elicitation_ciba::{
+    CibaApproverFactory, KIND as CIBA_KIND,
+};
 #[cfg(feature = "api-key")]
-pub use praxis_policy_plugin_identity_api_key::{ApiKeyIdentityFactory, KIND as API_KEY_KIND};
+pub use praxis_policy_builtins::plugins::identity_api_key::{
+    ApiKeyIdentityFactory, KIND as API_KEY_KIND,
+};
 #[cfg(feature = "jwt")]
-pub use praxis_policy_plugin_identity_jwt::{JwtIdentityFactory, KIND as JWT_KIND};
+pub use praxis_policy_builtins::plugins::identity_jwt::{JwtIdentityFactory, KIND as JWT_KIND};
 #[cfg(feature = "secrets-vault")]
-pub use praxis_policy_secrets_vault::{
+pub use praxis_policy_builtins::secrets::vault::{
     KIND as VAULT_SECRET_KIND, VaultSecretProviderFactory,
     register as register_vault_secret_provider, registry_with_vault,
 };
 #[cfg(feature = "valkey")]
-pub use praxis_policy_session_valkey::{
+pub use praxis_policy_builtins::session::valkey::{
     KIND as VALKEY_KIND, ValkeyConfig, ValkeySessionStoreFactory,
 };
 
@@ -188,12 +194,25 @@ macro_rules! register_builtins {
     };
 }
 
+// Module aliases for the `register_builtins!` arms below. The macro matches a
+// single identifier and uses it for both `KIND` and the factory type, which a
+// multi-segment module path cannot satisfy; aliasing keeps the registration
+// keyed off each extension's own `KIND` const.
+#[cfg(feature = "oauth")]
+use praxis_policy_builtins::plugins::delegator_oauth as oauth_builtin;
+#[cfg(feature = "elicitation-ciba")]
+use praxis_policy_builtins::plugins::elicitation_ciba as ciba_builtin;
+#[cfg(feature = "api-key")]
+use praxis_policy_builtins::plugins::identity_api_key as api_key_builtin;
+#[cfg(feature = "jwt")]
+use praxis_policy_builtins::plugins::identity_jwt as jwt_builtin;
+
 #[cfg(feature = "_builtin")]
 register_builtins! {
-    feature "jwt"              => praxis_policy_plugin_identity_jwt::JwtIdentityFactory,
-    feature "api-key"          => praxis_policy_plugin_identity_api_key::ApiKeyIdentityFactory,
-    feature "oauth"            => praxis_policy_plugin_delegator_oauth::OAuthDelegatorFactory,
-    feature "elicitation-ciba" => praxis_policy_plugin_elicitation_ciba::CibaApproverFactory,
+    feature "jwt"              => jwt_builtin::JwtIdentityFactory,
+    feature "api-key"          => api_key_builtin::ApiKeyIdentityFactory,
+    feature "oauth"            => oauth_builtin::OAuthDelegatorFactory,
+    feature "elicitation-ciba" => ciba_builtin::CibaApproverFactory,
 }
 
 /// The enabled PDP factories, ready to drop into
