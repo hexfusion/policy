@@ -404,3 +404,43 @@ fn an_empty_field_name_fails_at_config_load() {
 fn the_backend_names_itself() {
     assert_eq!(directory().kind(), "http");
 }
+
+// Deployment capture from 2026-09-24 with identifying values replaced.
+const CAPTURED_RESPONSE: &str = include_str!("fixtures/maas-validate-response.json");
+
+#[tokio::test]
+async fn a_captured_deployment_response_projects_as_documented() {
+    let transport =
+        Arc::new(FakeTransport::new().json("api-keys/validate", 200, CAPTURED_RESPONSE));
+    let resolver = crate::support::resolver(serde_json::json!({
+        "credential": { "kind": "header", "name": "Authorization" },
+        "prefix": "Bearer sk-oai-",
+        "directory": { "kind": "http", "url": URL },
+        "record_map": { "subject": { "id": "username", "roles": "groups" } },
+        "claims": { "exclude": ["userId", "keyId", "keyName"] },
+    }))
+    .expect("the config builds");
+
+    let result =
+        crate::support::resolve_over_http(&resolver, "Bearer sk-oai-abc123_secret", transport)
+            .await;
+    let subject = result
+        .modified_payload
+        .expect("the payload is modified")
+        .subject
+        .expect("the subject slot is filled");
+    assert_eq!(
+        subject.id.as_deref(),
+        Some("system:serviceaccount:example-tenant:example-consumer")
+    );
+    let mut roles: Vec<&str> = subject.roles.iter().map(String::as_str).collect();
+    roles.sort_unstable();
+    assert_eq!(
+        roles,
+        vec![
+            "system:authenticated",
+            "system:serviceaccounts",
+            "system:serviceaccounts:example-tenant"
+        ]
+    );
+}
