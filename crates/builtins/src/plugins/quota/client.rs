@@ -21,7 +21,7 @@ use serde_json::json;
 use praxis_policy_core::host::HttpRequestError;
 use praxis_policy_core::http::HttpTransportError;
 
-use crate::backend::{BackendError, BackendErrorKind, CheckOutcome, QuotaBackend};
+use super::backend::{BackendError, BackendErrorKind, CheckOutcome, QuotaBackend};
 
 /// The check probes with a delta of one, so it denies once the counter
 /// reaches the limit. It charges nothing. The debit happens in `report`.

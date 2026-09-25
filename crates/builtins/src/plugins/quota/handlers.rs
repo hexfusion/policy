@@ -13,9 +13,9 @@ use praxis_policy_core::hooks::{Extensions, HookHandler, PluginResult};
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
 use praxis_policy_core::prelude::PluginContext;
 
-use crate::backend::{BackendErrorKind, CheckOutcome, QuotaBackend};
-use crate::client::LimitadorClient;
-use crate::config::{OnErrorMode, QuotaConfig};
+use super::backend::{BackendErrorKind, CheckOutcome, QuotaBackend};
+use super::client::LimitadorClient;
+use super::config::{OnErrorMode, QuotaConfig};
 
 /// Over-budget denial. Mapped to HTTP 429.
 pub const CODE_QUOTA_EXHAUSTED: &str = "quota.exhausted";
@@ -319,12 +319,12 @@ pub mod bench {
     use super::Extensions;
     use std::borrow::Cow;
 
-    /// See [`super::resolve_identity`].
+    /// Benchmark wrapper over the crate-private `resolve_identity`.
     pub fn resolve_identity<'a>(ext: &'a Extensions, identity_claim: &str) -> Option<Cow<'a, str>> {
         super::resolve_identity(ext, identity_claim)
     }
 
-    /// See [`super::extract_usage`].
+    /// Benchmark wrapper over the crate-private `extract_usage`.
     pub fn extract_usage(body: &str, path: &str) -> Option<u64> {
         super::extract_usage(body, path)
     }

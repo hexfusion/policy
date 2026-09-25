@@ -26,8 +26,8 @@ use praxis_policy_core::plugin::PluginConfig;
 use praxis_policy_core::prelude::PluginContext;
 use serde_json::json;
 
-use praxis_policy_plugin_quota::factory::KIND;
-use praxis_policy_plugin_quota::handlers::{Quota, QuotaCheck, QuotaReport};
+use praxis_policy_builtins::plugins::quota::factory::KIND;
+use praxis_policy_builtins::plugins::quota::handlers::{Quota, QuotaCheck, QuotaReport};
 
 /// Build a core with an optional `on_error` override. The endpoint is a fixed
 /// placeholder: the transport matches on the `/check` and `/report` path, not

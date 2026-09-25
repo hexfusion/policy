@@ -42,7 +42,7 @@ use praxis_policy_core::hooks::TypedHandlerAdapter;
 use praxis_policy_core::plugin::PluginConfig;
 use praxis_policy_core::registry::AnyHookHandler;
 
-use crate::handlers::{Quota, QuotaCheck, QuotaReport};
+use super::handlers::{Quota, QuotaCheck, QuotaReport};
 
 /// The `kind:` string operators write in PPE YAML.
 pub const KIND: &str = "quota";

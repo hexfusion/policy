@@ -7,12 +7,12 @@
 //! and is out of scope here. This guards the plugin's own cost and the
 //! borrow-not-clone identity path.
 //!
-//! Run with `cargo bench -p praxis-policy-plugin-quota --features bench`.
+//! Run with `cargo bench -p praxis-policy-builtins --features quota,bench`.
 
 use std::sync::Arc;
 
+use praxis_policy_builtins::plugins::quota::handlers::bench::{extract_usage, resolve_identity};
 use praxis_policy_core::extensions::{Extensions, SecurityExtension, SubjectExtension};
-use praxis_policy_plugin_quota::handlers::bench::{extract_usage, resolve_identity};
 
 fn main() {
     divan::main();
