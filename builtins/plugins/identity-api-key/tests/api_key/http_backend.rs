@@ -415,7 +415,7 @@ async fn a_captured_deployment_response_projects_as_documented() {
     let resolver = crate::support::resolver(serde_json::json!({
         "credential": { "kind": "header", "name": "Authorization" },
         "prefix": "Bearer sk-oai-",
-        "directory": { "kind": "http", "url": URL },
+        "provider": { "kind": "http", "url": URL },
         "record_map": { "subject": { "id": "username", "roles": "groups" } },
         "claims": { "exclude": ["userId", "keyId", "keyName"] },
     }))

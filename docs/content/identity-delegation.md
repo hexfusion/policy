@@ -455,7 +455,7 @@ plugins:
       credential:
         kind: header
         name: X-API-Key
-      directory:
+      provider:
         kind: file
         path: /etc/ppe/keys.yaml
         refresh_secs: 30
@@ -497,7 +497,7 @@ plugins:
         kind: header
         name: Authorization
       prefix: "Bearer sk-oai-"
-      directory:
+      provider:
         kind: http
         url: "https://maas-api.example.com/internal/v1/api-keys/validate"
         timeout_secs: 5
