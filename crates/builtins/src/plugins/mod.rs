@@ -10,7 +10,7 @@
 //! - `identity_api_key` (`api-key`) — kind `identity/api-key`
 //! - `delegator_oauth` (`oauth`) — kind `delegator/oauth`
 //! - `elicitation_ciba` (`elicitation-ciba`) — kind `elicitation/ciba`
-//! - `quota` (`quota`) — kind `quota`
+//! - `quota` (`experimental-quota`) — kind `quota`
 
 #[cfg(feature = "jwt")]
 pub mod identity_jwt;
@@ -24,5 +24,5 @@ pub mod delegator_oauth;
 #[cfg(feature = "elicitation-ciba")]
 pub mod elicitation_ciba;
 
-#[cfg(feature = "quota")]
+#[cfg(feature = "experimental-quota")]
 pub mod quota;

@@ -38,10 +38,9 @@ oauth = [
   "dep:moka",
 ]
 elicitation-ciba = ["_engine-core", "_plugins", "dep:base64"]
-# Durable per-consumer token quota against a standalone Limitador. Carries no
-# HTTP client of its own: the Limitador calls go through the host transport, so
-# it needs no dep beyond core and the shared serde/bytes already in this crate.
-quota = ["_engine-core", "_plugins"]
+# Experimental per-consumer token quota against a standalone Limitador. Calls go
+# through the host transport, so no HTTP dep beyond core and the shared serde.
+experimental-quota = ["_engine-core", "_plugins"]
 cedar = ["_engine-apl-core", "_pdps", "dep:cedar-policy", "dep:stacker"]
 # The feature and the crate share a name, so `dep:cel` is required: without it
 # the feature would shadow the implicit optional-dependency feature instead of
@@ -58,9 +57,8 @@ valkey = [
 ]
 secrets-vault = ["_engine-core", "_secrets"]
 
-# Exposes the quota plugin's per-request hot-path functions for its
-# microbenchmark. Off by default, so a normal build keeps them private. Paired
-# with `quota` by the `[[bench]]` target below.
+# Exposes the quota plugin's hot-path functions for its microbenchmark. Off by
+# default; paired with `experimental-quota` by the `[[bench]]` target below.
 bench = []
 
 # Private upstream-edge markers. Each engine dependency is named in exactly one
@@ -364,13 +362,13 @@ required-features = ["valkey"]
 [[test]]
 name = "quota"
 path = "tests/quota/main.rs"
-required-features = ["quota"]
+required-features = ["experimental-quota"]
 
 [[bench]]
 name = "quota_hot_path"
 path = "benches/quota_hot_path.rs"
 harness = false
-required-features = ["quota", "bench"]
+required-features = ["experimental-quota", "bench"]
 
 [lints]
 workspace = true

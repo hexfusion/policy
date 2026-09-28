@@ -2737,6 +2737,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tower-service",
+ "tracing",
  "webpki-roots",
  "yaml_serde",
 ]
