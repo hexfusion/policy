@@ -51,6 +51,12 @@ pub struct QuotaConfig {
     #[serde(default = "default_timeout_seconds")]
     pub timeout_seconds: u64,
 
+    /// Tokens debited when usage cannot be determined (streaming, absent field).
+    /// Non-zero so the balance still moves; over-charge is the fail-closed
+    /// direction. Default 1000.
+    #[serde(default = "default_missing_usage_charge")]
+    pub missing_usage_charge: u64,
+
     /// Whether to serve a request that carries no resolved identity. Default
     /// false: with nothing to meter, the request is denied (fail closed),
     /// matching the posture for a missing backend, so a dropped identity claim
@@ -83,6 +89,11 @@ fn default_usage_json_path() -> String {
 /// Default per-call HTTP timeout, in seconds.
 fn default_timeout_seconds() -> u64 {
     5
+}
+
+/// Default conservative debit when usage cannot be determined.
+fn default_missing_usage_charge() -> u64 {
+    1000
 }
 
 impl QuotaConfig {
@@ -124,6 +135,7 @@ mod tests {
         assert_eq!(cfg.usage_json_path, "usage.total_tokens");
         assert_eq!(cfg.on_error, OnErrorMode::Deny);
         assert_eq!(cfg.timeout_seconds, 5);
+        assert_eq!(cfg.missing_usage_charge, 1000);
         assert!(
             !cfg.allow_unauthenticated,
             "a request with no identity must fail closed by default"
@@ -171,6 +183,7 @@ mod tests {
             on_error: OnErrorMode::Allow,
             usage_json_path: default_usage_json_path(),
             timeout_seconds: 5,
+            missing_usage_charge: default_missing_usage_charge(),
             allow_unauthenticated: false,
         };
         let err = cfg.validate().unwrap_err();
@@ -186,6 +199,7 @@ mod tests {
             on_error: OnErrorMode::Allow,
             usage_json_path: default_usage_json_path(),
             timeout_seconds: 5,
+            missing_usage_charge: default_missing_usage_charge(),
             allow_unauthenticated: false,
         };
         let err = cfg.validate().unwrap_err();

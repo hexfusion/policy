@@ -4,7 +4,8 @@
 // QuotaCheck (cmf.llm_input, pre-invoke admission) and QuotaReport
 // (cmf.llm_output, post-invoke debit), sharing one Quota core.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use praxis_policy_core::cmf::{CmfHook, MessagePayload};
@@ -32,16 +33,67 @@ pub const CODE_QUOTA_EGRESS_DENIED: &str = "quota.egress_denied";
 /// `allow_unauthenticated` is not set.
 pub const CODE_QUOTA_NO_IDENTITY: &str = "quota.no_identity";
 
+/// Fail-closed denial while a prior debit for this principal has not landed in
+/// Limitador. The next admission re-reports it; a retry clears it once it lands.
+pub const CODE_QUOTA_UNSETTLED_DEBIT: &str = "quota.unsettled_debit";
+
 /// HTTP 429, set as the violation's `proto_error_code` for an over-budget denial.
 const HTTP_TOO_MANY_REQUESTS: i64 = 429;
 
+/// A token debit that failed to reach Limitador, held until a later `/report`
+/// confirms it landed. Never expires on a timer: clearing without a confirmed
+/// report is a silent under-charge, the fail-open bug this state exists to close.
+#[derive(Debug, Default)]
+struct PendingDebit {
+    /// Accumulated unreported tokens for this principal.
+    delta: u64,
+    /// A flush is in flight, so a concurrent check must not re-report the same
+    /// accumulated delta (a deterministic double-charge, distinct from the
+    /// unavoidable ambiguous-loss one).
+    flushing: bool,
+}
+
+/// Whether a pending-debit flush leaves admission able to proceed.
+enum FlushOutcome {
+    /// No pending debit, or it flushed successfully: run the normal probe.
+    Proceed,
+    /// A debit is unsettled (flush failed, or another flush is in flight):
+    /// deny, fail-closed, until it lands.
+    Deny,
+}
+
+/// Resets `flushing` on drop unless the settle committed, so a flush future
+/// cancelled at the await does not wedge the principal in permanent deny.
+struct FlushClaim<'a> {
+    pending: &'a Mutex<HashMap<String, PendingDebit>>,
+    principal: &'a str,
+    committed: bool,
+}
+
+impl Drop for FlushClaim<'_> {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let mut map = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(p) = map.get_mut(self.principal) {
+            p.flushing = false;
+        }
+    }
+}
+
 /// Shared runtime state for both handlers: the parsed config, the quota
-/// backend (a trait object), and the declared `PluginConfig`.
+/// backend (a trait object), the declared `PluginConfig`, and the per-principal
+/// pending debits a failed `/report` accumulates for the next admission to flush.
 #[derive(Debug)]
 pub struct Quota {
     cfg: PluginConfig,
     typed: QuotaConfig,
     backend: Box<dyn QuotaBackend>,
+    pending: Mutex<HashMap<String, PendingDebit>>,
 }
 
 impl Quota {
@@ -88,7 +140,74 @@ impl Quota {
             cfg,
             typed,
             backend,
+            pending: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Lock the pending map, recovering a poisoned guard.
+    fn pending(&self) -> std::sync::MutexGuard<'_, HashMap<String, PendingDebit>> {
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Record a debit that failed to land, for the next admission to re-report.
+    fn record_failed_debit(&self, principal: &str, delta: u64) {
+        let mut map = self.pending();
+        let entry = map.entry(principal.to_owned()).or_default();
+        entry.delta = entry.delta.saturating_add(delta);
+    }
+
+    /// Flush a principal's pending debit before admitting. The lock is dropped
+    /// across the `/report` await; a concurrent flush is denied, not re-reported.
+    async fn flush_pending(&self, ext: &Extensions, claim: &str, principal: &str) -> FlushOutcome {
+        let attempted = {
+            let mut map = self.pending();
+            match map.get_mut(principal) {
+                None => return FlushOutcome::Proceed,
+                Some(p) if p.delta == 0 => return FlushOutcome::Proceed,
+                Some(p) if p.flushing => return FlushOutcome::Deny,
+                Some(p) => {
+                    p.flushing = true;
+                    p.delta
+                },
+            }
+        };
+
+        // Resets `flushing` if the await is cancelled; the settle sets `committed`.
+        let mut flush_claim = FlushClaim {
+            pending: &self.pending,
+            principal,
+            committed: false,
+        };
+
+        let result = self.backend.report(ext, claim, principal, attempted).await;
+        flush_claim.committed = true;
+
+        let mut map = self.pending();
+        let outcome = match map.get_mut(principal) {
+            Some(p) => {
+                p.flushing = false;
+                match result {
+                    Ok(()) => {
+                        p.delta = p.delta.saturating_sub(attempted);
+                        FlushOutcome::Proceed
+                    },
+                    Err(_) => FlushOutcome::Deny,
+                }
+            },
+            None => match result {
+                Ok(()) => FlushOutcome::Proceed,
+                Err(_) => FlushOutcome::Deny,
+            },
+        };
+        if map
+            .get(principal)
+            .is_some_and(|p| p.delta == 0 && !p.flushing)
+        {
+            map.remove(principal);
+        }
+        outcome
     }
 }
 
@@ -151,6 +270,18 @@ impl HookHandler<CmfHook> for QuotaCheck {
                 "no resolved identity to meter",
             ));
         };
+
+        // Settle any prior debit that failed to land before admitting again.
+        if let FlushOutcome::Deny = self.core.flush_pending(extensions, claim, &sub).await {
+            tracing::warn!(
+                claim = claim.as_str(),
+                "quota: denying; a prior token debit is unsettled and must re-report first"
+            );
+            return PluginResult::deny(PluginViolation::new(
+                CODE_QUOTA_UNSETTLED_DEBIT,
+                "a prior token debit is unsettled",
+            ));
+        }
 
         match self.core.backend.check(extensions, claim, &sub).await {
             Ok(CheckOutcome::WithinLimit) => PluginResult::allow(),
@@ -252,10 +383,9 @@ impl HookHandler<CmfHook> for QuotaReport {
                     &payload.message.get_text_content(),
                     &self.core.typed.usage_json_path,
                 )
-            });
-        let Some(total) = total else {
-            return PluginResult::allow();
-        };
+            })
+            // Undetermined usage debits the fallback, never 0.
+            .unwrap_or(self.core.typed.missing_usage_charge);
         if total == 0 {
             return PluginResult::allow();
         }
@@ -266,12 +396,13 @@ impl HookHandler<CmfHook> for QuotaReport {
             .report(extensions, claim, &sub, total)
             .await
         {
-            // A report failure never denies. The response is already out.
+            // Debit did not land: record it for the next admission to re-report.
             tracing::warn!(
                 error = %e,
                 delta = total,
-                "quota: token debit failed; balance may lag"
+                "quota: token debit failed; recorded for retry, principal denied until it settles"
             );
+            self.core.record_failed_debit(&sub, total);
         }
         PluginResult::allow()
     }

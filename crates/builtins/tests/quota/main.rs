@@ -252,11 +252,12 @@ async fn report_debits_the_parsed_total() {
 }
 
 #[tokio::test]
-async fn report_debits_nothing_when_usage_absent() {
+async fn report_debits_the_fallback_when_usage_absent() {
     let t = Arc::new(FakeTransport::new().json("/report", 200, ""));
     let handler = QuotaReport::new(core("allow"));
     let mut ctx = PluginContext::new();
-    // Streaming chunk with no usage object.
+    // Streaming chunk with no usage object: undetermined usage debits the
+    // conservative fallback (missing_usage_charge, default 1000), never nothing.
     let body = r#"{"choices":[{"delta":{"content":"hi"}}]}"#;
     let result = handler
         .handle(
@@ -266,7 +267,9 @@ async fn report_debits_nothing_when_usage_absent() {
         )
         .await;
     assert!(!result.is_denied(), "an absent total must never deny");
-    assert_eq!(t.call_count_for("/report"), 0, "no usage means no debit");
+    let sent =
+        String::from_utf8_lossy(&t.last_request().expect("a fallback debit").body).into_owned();
+    assert!(sent.contains(r#""delta":1000"#), "{sent}");
 }
 
 #[tokio::test]
@@ -281,6 +284,128 @@ async fn report_never_denies_even_when_the_debit_fails() {
         .handle(&output_payload(body), &ext_with_sub("bob", t), &mut ctx)
         .await;
     assert!(!result.is_denied(), "a failed debit must never deny");
+}
+
+#[tokio::test]
+async fn a_failed_debit_denies_until_it_settles() {
+    // Shared core, so the report's failure is visible to the check.
+    let core = core("deny");
+
+    // A debit of 11 fails to reach Limitador and is recorded as pending.
+    let t_fail = Arc::new(FakeTransport::new().json("/report", 500, ""));
+    let report = QuotaReport::new(Arc::clone(&core));
+    let out = report
+        .handle(
+            &output_payload(r#"{"usage":{"total_tokens":11}}"#),
+            &ext_with_sub("bob", as_transport(&t_fail)),
+            &mut PluginContext::new(),
+        )
+        .await;
+    assert!(!out.is_denied(), "the report hook never denies");
+
+    // Next admission: the flush still fails, so deny (fail-closed) without even
+    // running the check probe.
+    let check = QuotaCheck::new(Arc::clone(&core));
+    let t_still = Arc::new(
+        FakeTransport::new()
+            .json("/report", 500, "")
+            .json("/check", 200, ""),
+    );
+    let denied = check
+        .handle(
+            &input_payload(),
+            &ext_with_sub("bob", as_transport(&t_still)),
+            &mut PluginContext::new(),
+        )
+        .await;
+    assert!(denied.is_denied(), "an unsettled debit must fail closed");
+    assert_eq!(
+        t_still.call_count_for("/check"),
+        0,
+        "the probe is skipped while the debit is unsettled"
+    );
+
+    // Next admission: the flush succeeds, re-reporting the accumulated 11, then
+    // the probe admits.
+    let t_ok = Arc::new(
+        FakeTransport::new()
+            .json("/report", 200, "")
+            .json("/check", 200, ""),
+    );
+    let allowed = check
+        .handle(
+            &input_payload(),
+            &ext_with_sub("bob", as_transport(&t_ok)),
+            &mut PluginContext::new(),
+        )
+        .await;
+    assert!(
+        !allowed.is_denied(),
+        "admission resumes once the debit settles"
+    );
+    assert_eq!(
+        t_ok.call_count_for("/check"),
+        1,
+        "the probe runs after the flush"
+    );
+    let re_reported = t_ok
+        .requests()
+        .iter()
+        .any(|r| String::from_utf8_lossy(&r.body).contains(r#""delta":11"#));
+    assert!(re_reported, "the accumulated debit is re-reported in full");
+}
+
+#[tokio::test]
+async fn a_cancelled_flush_does_not_wedge_the_principal() {
+    let core = core("deny");
+
+    // Record a pending debit.
+    let t_fail = Arc::new(FakeTransport::new().json("/report", 500, ""));
+    let out = QuotaReport::new(Arc::clone(&core))
+        .handle(
+            &output_payload(r#"{"usage":{"total_tokens":7}}"#),
+            &ext_with_sub("bob", as_transport(&t_fail)),
+            &mut PluginContext::new(),
+        )
+        .await;
+    assert!(!out.is_denied());
+
+    // Start a flush whose report hangs, then cancel it by dropping the future.
+    let check = QuotaCheck::new(Arc::clone(&core));
+    let t_slow = Arc::new(
+        FakeTransport::new()
+            .with_latency(std::time::Duration::from_secs(30))
+            .json("/report", 200, "")
+            .json("/check", 200, ""),
+    );
+    let payload = input_payload();
+    let ext = ext_with_sub("bob", as_transport(&t_slow));
+    let mut ctx = PluginContext::new();
+    let fut = check.handle(&payload, &ext, &mut ctx);
+    let cancelled = tokio::time::timeout(std::time::Duration::from_millis(50), fut).await;
+    assert!(
+        cancelled.is_err(),
+        "the flush should still be hanging at the report await"
+    );
+    // fut dropped here; FlushClaim::drop must reset `flushing`.
+
+    // A fresh admission must flush and proceed, not be wedged in permanent deny.
+    let t_ok = Arc::new(
+        FakeTransport::new()
+            .json("/report", 200, "")
+            .json("/check", 200, ""),
+    );
+    let allowed = check
+        .handle(
+            &input_payload(),
+            &ext_with_sub("bob", as_transport(&t_ok)),
+            &mut PluginContext::new(),
+        )
+        .await;
+    assert!(
+        !allowed.is_denied(),
+        "a cancelled flush must not wedge the principal into permanent deny"
+    );
 }
 
 #[tokio::test]
@@ -392,7 +517,7 @@ async fn report_skips_the_debit_without_a_resolved_identity() {
 }
 
 #[tokio::test]
-async fn report_refuses_a_fractional_body_total() {
+async fn report_charges_the_fallback_on_a_fractional_body_total() {
     let t = Arc::new(FakeTransport::new().json("/report", 200, ""));
     let handler = QuotaReport::new(core("allow"));
     let mut ctx = PluginContext::new();
@@ -406,11 +531,14 @@ async fn report_refuses_a_fractional_body_total() {
         )
         .await;
     assert!(!result.is_denied());
-    assert_eq!(t.call_count_for("/report"), 0, "a float is not a debit");
+    // A malformed total is undetermined usage, so it debits the fallback.
+    let sent =
+        String::from_utf8_lossy(&t.last_request().expect("a fallback debit").body).into_owned();
+    assert!(sent.contains(r#""delta":1000"#), "{sent}");
 }
 
 #[tokio::test]
-async fn report_ignores_a_negative_body_total() {
+async fn report_charges_the_fallback_on_a_negative_body_total() {
     let t = Arc::new(FakeTransport::new().json("/report", 200, ""));
     let handler = QuotaReport::new(core("allow"));
     let mut ctx = PluginContext::new();
@@ -423,7 +551,10 @@ async fn report_ignores_a_negative_body_total() {
         )
         .await;
     assert!(!result.is_denied());
-    assert_eq!(t.call_count_for("/report"), 0, "a negative is not a debit");
+    // A negative total is undetermined usage, so it debits the fallback.
+    let sent =
+        String::from_utf8_lossy(&t.last_request().expect("a fallback debit").body).into_owned();
+    assert!(sent.contains(r#""delta":1000"#), "{sent}");
 }
 
 #[tokio::test]
