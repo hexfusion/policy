@@ -582,6 +582,24 @@ async fn check_fails_open_on_a_server_error_under_on_error_allow() {
     );
 }
 
+#[tokio::test]
+async fn check_fails_closed_on_a_config_error_4xx_even_under_on_error_allow() {
+    // A 400 is a config-class fault (bad namespace/path/body). It must NOT ride
+    // on_error: allow and silently disable enforcement; it denies regardless.
+    let t = Arc::new(FakeTransport::new().json("/check", 400, ""));
+    let handler = QuotaCheck::new(core("allow"));
+    let mut ctx = PluginContext::new();
+    let result = handler
+        .handle(&input_payload(), &ext_with_sub("bob", t), &mut ctx)
+        .await;
+    assert!(
+        result.is_denied(),
+        "a config-error 4xx must fail closed even under on_error: allow"
+    );
+    let violation = result.violation.expect("a denial carries a violation");
+    assert_eq!(violation.code, "quota.backend_unavailable");
+}
+
 /// A stateful in-process transport that models the real Limitador counter:
 /// `/check` with the plugin's probe delta of 1 refuses once the counter would
 /// exceed `max`, and `/report` increments unconditionally. This is what a

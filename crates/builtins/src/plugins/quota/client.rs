@@ -122,6 +122,22 @@ fn classify(err: &HttpRequestError) -> BackendErrorKind {
     }
 }
 
+/// Sort an unexpected Limitador HTTP status into a [`BackendErrorKind`].
+///
+/// A non-429 4xx is a permanent request fault: a wrong namespace or path, an
+/// auth failure, a rejected body. No retry fixes it, so it fails closed
+/// regardless of `on_error` — otherwise a misconfigured deployment serves every
+/// request unmetered under `on_error: allow`. Everything else (5xx, and any
+/// other unexpected status) is a transient server-side fault that `on_error`
+/// governs. `/check` maps 429 to a verdict before reaching here.
+fn classify_status(status: u16) -> BackendErrorKind {
+    if (400..500).contains(&status) {
+        BackendErrorKind::Unavailable
+    } else {
+        BackendErrorKind::Transport
+    }
+}
+
 #[async_trait]
 impl QuotaBackend for LimitadorClient {
     async fn check(
@@ -141,7 +157,7 @@ impl QuotaBackend for LimitadorClient {
             STATUS_TOO_MANY_REQUESTS => Ok(CheckOutcome::OverLimit),
             other => Err(BackendError {
                 message: format!("Limitador /check returned unexpected status {other}"),
-                kind: BackendErrorKind::Transport,
+                kind: classify_status(other),
             }),
         }
     }
@@ -164,7 +180,7 @@ impl QuotaBackend for LimitadorClient {
         }
         Err(BackendError {
             message: format!("Limitador /report returned unexpected status {status}"),
-            kind: BackendErrorKind::Transport,
+            kind: classify_status(status),
         })
     }
 }
@@ -231,16 +247,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn check_unexpected_status_is_an_error() {
+    async fn check_5xx_is_transient_and_rides_on_error() {
         let t = Arc::new(FakeTransport::new().json("/check", 500, ""));
         let err = client()
             .check(&ext_with(&t), "sub", "bob")
             .await
             .unwrap_err();
         assert!(err.message.contains("500"), "{}", err.message);
-        // An unrecognized status is the backend answering oddly, so on_error
-        // governs it.
+        // A 5xx is the backend faulting server-side, so on_error governs it.
         assert_eq!(err.kind, BackendErrorKind::Transport);
+    }
+
+    #[tokio::test]
+    async fn check_non_429_4xx_fails_closed() {
+        // A 4xx other than 429 is a permanent request fault (bad namespace/path,
+        // auth, rejected body). It must map to Unavailable so it denies
+        // regardless of on_error, never serving unmetered on a misconfiguration.
+        for status in [400_u16, 401, 403, 404, 422] {
+            let t = Arc::new(FakeTransport::new().json("/check", status, ""));
+            let err = client()
+                .check(&ext_with(&t), "sub", "bob")
+                .await
+                .unwrap_err();
+            assert_eq!(
+                err.kind,
+                BackendErrorKind::Unavailable,
+                "status {status} must fail closed"
+            );
+        }
     }
 
     #[tokio::test]
