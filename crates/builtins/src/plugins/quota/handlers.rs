@@ -13,6 +13,8 @@ use praxis_policy_core::error::{PluginError, PluginViolation};
 use praxis_policy_core::hooks::{Extensions, HookHandler, PluginResult};
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
 use praxis_policy_core::prelude::PluginContext;
+use tokio_util::task::TaskTracker;
+use tracing::Instrument as _;
 
 use super::backend::{BackendErrorKind, CheckOutcome, QuotaBackend};
 use super::client::LimitadorClient;
@@ -36,6 +38,9 @@ pub const CODE_QUOTA_NO_IDENTITY: &str = "quota.no_identity";
 /// Fail-closed denial while a prior debit for this principal has not landed in
 /// Limitador. The next admission re-reports it; a retry clears it once it lands.
 pub const CODE_QUOTA_UNSETTLED_DEBIT: &str = "quota.unsettled_debit";
+
+/// Slack past `timeout_seconds` for the shutdown drain of in-flight debits.
+const DRAIN_SLACK: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// HTTP 429, set as the violation's `proto_error_code` for an over-budget denial.
 const HTTP_TOO_MANY_REQUESTS: i64 = 429;
@@ -94,6 +99,9 @@ pub struct Quota {
     typed: QuotaConfig,
     backend: Box<dyn QuotaBackend>,
     pending: Mutex<HashMap<String, PendingDebit>>,
+    /// Tracks in-flight debits so `shutdown` can drain them instead of
+    /// dropping them mid-flight on a restart.
+    debits: TaskTracker,
 }
 
 impl Quota {
@@ -141,6 +149,7 @@ impl Quota {
             typed,
             backend,
             pending: Mutex::new(HashMap::new()),
+            debits: TaskTracker::new(),
         })
     }
 
@@ -234,6 +243,24 @@ impl Quota {
 impl Plugin for Quota {
     fn config(&self) -> &PluginConfig {
         &self.cfg
+    }
+
+    /// Drain in-flight debits so a shutdown or rolling restart lets them land
+    /// (or record as pending) instead of dropping them. Bounded: each debit is
+    /// one call capped at `timeout_seconds`, and they run concurrently.
+    async fn shutdown(&self) -> Result<(), Box<PluginError>> {
+        self.debits.close();
+        let bound = self.typed.timeout() + DRAIN_SLACK;
+        if tokio::time::timeout(bound, self.debits.wait())
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                in_flight = self.debits.len(),
+                "quota: shutdown drain timed out; in-flight token debits dropped"
+            );
+        }
+        Ok(())
     }
 }
 
@@ -406,20 +433,24 @@ impl HookHandler<CmfHook> for QuotaReport {
             return PluginResult::allow();
         }
 
-        // Debit off the response path. A slow /report would otherwise add its
-        // round trip to the response tail (up to timeout_seconds), so spawn it.
-        // A failed debit is recorded as pending and re-reported by the next
-        // admission, which denies until it lands, so the fail-closed guarantee
-        // survives the report being asynchronous. Only the CHECK is synchronous.
+        // Debit off the response path so a slow /report does not hold the
+        // response. The response is released before the debit lands, so the
+        // principal's next request can be admitted against the pre-debit
+        // counter. A failed debit is recorded as pending on this replica and
+        // denies until it re-reports; that state is in-process, so a restart
+        // loses it. Tracked so shutdown drains in-flight debits.
         let core = Arc::clone(&self.core);
         let report_ext = Extensions {
             http_transport: extensions.http_transport.clone(),
             ..Default::default()
         };
         let principal = sub.into_owned();
-        tokio::spawn(async move {
-            core.debit(&report_ext, &principal, total).await;
-        });
+        self.core.debits.spawn(
+            async move {
+                core.debit(&report_ext, &principal, total).await;
+            }
+            .instrument(tracing::Span::current()),
+        );
         PluginResult::allow()
     }
 }

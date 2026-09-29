@@ -39,8 +39,9 @@ oauth = [
 ]
 elicitation-ciba = ["_engine-core", "_plugins", "dep:base64"]
 # Experimental per-consumer token quota against a standalone Limitador. Calls go
-# through the host transport, so no HTTP dep beyond core and the shared serde.
-experimental-quota = ["_engine-core", "_plugins"]
+# through the host transport, so no HTTP dep beyond core, the shared serde, and
+# tokio-util (already under core) for draining in-flight debits.
+experimental-quota = ["_engine-core", "_plugins", "dep:tokio-util"]
 cedar = ["_engine-apl-core", "_pdps", "dep:cedar-policy", "dep:stacker"]
 # The feature and the crate share a name, so `dep:cel` is required: without it
 # the feature would shadow the implicit optional-dependency feature instead of
@@ -97,6 +98,12 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 zeroize = { workspace = true }
+
+# --- experimental-quota ------------------------------------------------------
+
+# TaskTracker for the quota plugin's in-flight debits, drained on shutdown.
+# praxis-policy-core already depends on it, so this adds nothing to the tree.
+tokio-util = { workspace = true, optional = true }
 
 # --- jwt ---------------------------------------------------------------------
 

@@ -27,7 +27,7 @@ use praxis_policy_core::hooks::HookHandler as _;
 use praxis_policy_core::host::HttpTransportSlot;
 use praxis_policy_core::http::{HttpRequest, HttpResponse, HttpTransport, HttpTransportError};
 use praxis_policy_core::http_testing::FakeTransport;
-use praxis_policy_core::plugin::PluginConfig;
+use praxis_policy_core::plugin::{Plugin as _, PluginConfig};
 use praxis_policy_core::prelude::PluginContext;
 use serde_json::json;
 
@@ -602,6 +602,7 @@ struct CountingLimitador {
     counter: Mutex<u64>,
     max: u64,
     reports: std::sync::atomic::AtomicU64,
+    latency: Option<std::time::Duration>,
 }
 
 impl CountingLimitador {
@@ -610,7 +611,14 @@ impl CountingLimitador {
             counter: Mutex::new(0),
             max,
             reports: std::sync::atomic::AtomicU64::new(0),
+            latency: None,
         }
+    }
+
+    /// Answer each call only after `latency`, counting a /report once it lands.
+    fn with_latency(mut self, latency: std::time::Duration) -> Self {
+        self.latency = Some(latency);
+        self
     }
 
     /// How many /report calls have landed, so a test can wait for the spawned
@@ -630,6 +638,9 @@ impl CountingLimitador {
 #[async_trait::async_trait]
 impl HttpTransport for CountingLimitador {
     async fn execute(&self, req: HttpRequest) -> Result<HttpResponse, HttpTransportError> {
+        if let Some(latency) = self.latency {
+            tokio::time::sleep(latency).await;
+        }
         let delta = Self::delta(&req.body);
         // No await while the guard is held: compute the status, then answer.
         let status = {
@@ -695,4 +706,72 @@ async fn a_principal_is_denied_once_cumulative_debits_reach_the_budget() {
     assert!(denied.is_denied(), "a principal over budget must be denied");
     let violation = denied.violation.expect("a denial carries a violation");
     assert_eq!(violation.code, "quota.exhausted");
+}
+
+#[tokio::test]
+async fn shutdown_drains_an_in_flight_debit_so_it_lands() {
+    // A debit still in flight at shutdown must land, not be dropped with the
+    // task. shutdown returns only after the slow /report has been counted.
+    let lim =
+        Arc::new(CountingLimitador::new(100).with_latency(std::time::Duration::from_millis(100)));
+    let core = core("deny");
+    let out = QuotaReport::new(Arc::clone(&core))
+        .handle(
+            &output_payload("done"),
+            &ext_with_sub_and_usage("bob", 40, lim.clone()),
+            &mut PluginContext::new(),
+        )
+        .await;
+    assert!(!out.is_denied());
+    assert_eq!(lim.reports_seen(), 0, "the debit is still in flight");
+
+    core.shutdown().await.expect("shutdown succeeds");
+    assert_eq!(
+        lim.reports_seen(),
+        1,
+        "shutdown must drain the in-flight debit"
+    );
+}
+
+#[tokio::test]
+async fn shutdown_drains_a_failing_debit_so_it_is_recorded_pending() {
+    // A debit that fails while shutdown drains it must still be recorded as
+    // pending, so the principal is denied until it settles.
+    let core = core("deny");
+    let t_fail = Arc::new(
+        FakeTransport::new()
+            .with_latency(std::time::Duration::from_millis(100))
+            .json("/report", 500, ""),
+    );
+    let out = QuotaReport::new(Arc::clone(&core))
+        .handle(
+            &output_payload("done"),
+            &ext_with_sub_and_usage("bob", 11, as_transport(&t_fail)),
+            &mut PluginContext::new(),
+        )
+        .await;
+    assert!(!out.is_denied());
+
+    core.shutdown().await.expect("shutdown succeeds");
+
+    let t_still = Arc::new(
+        FakeTransport::new()
+            .json("/report", 500, "")
+            .json("/check", 200, ""),
+    );
+    let denied = QuotaCheck::new(Arc::clone(&core))
+        .handle(
+            &input_payload(),
+            &ext_with_sub("bob", as_transport(&t_still)),
+            &mut PluginContext::new(),
+        )
+        .await;
+    assert!(
+        denied.is_denied(),
+        "the drained failed debit must be pending"
+    );
+    assert_eq!(
+        denied.violation.expect("a denial carries a violation").code,
+        "quota.unsettled_debit"
+    );
 }

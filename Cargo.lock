@@ -2789,6 +2789,7 @@ dependencies = [
  "testcontainers-modules",
  "thiserror",
  "tokio",
+ "tokio-util",
  "tracing",
  "url",
  "yaml_serde",
