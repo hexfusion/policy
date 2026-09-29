@@ -100,8 +100,9 @@ impl QuotaConfig {
     ///
     /// # Errors
     ///
-    /// A message when `endpoint` or `namespace` is empty, or when `endpoint` is
-    /// a plaintext `http://` URL and `insecure_http` is not set.
+    /// A message when `endpoint` or `namespace` is empty, when `endpoint` is a
+    /// plaintext `http://` URL and `insecure_http` is not set, or when it uses
+    /// any scheme other than `https://` or `http://`.
     pub fn validate(&self) -> Result<(), String> {
         let endpoint = self.endpoint.trim();
         if endpoint.is_empty() {
@@ -110,11 +111,17 @@ impl QuotaConfig {
         if self.namespace.trim().is_empty() {
             return Err("quota: namespace must be non-empty".to_owned());
         }
-        // Secure by default: an https endpoint lets the host transport encrypt
-        // the connection (and present a client certificate, if the host is
-        // configured for mTLS). A non-https scheme other than http is left to
-        // the request builder to reject.
-        if endpoint.to_ascii_lowercase().starts_with("http://") && !self.insecure_http {
+        // Allowlist, secure by default: https lets the host transport encrypt
+        // the connection. Any other scheme fails here at construction rather
+        // than at the connector, where a Connect error would ride on_error.
+        let lowered = endpoint.to_ascii_lowercase();
+        if lowered.starts_with("https://") {
+            return Ok(());
+        }
+        if lowered.starts_with("http://") {
+            if self.insecure_http {
+                return Ok(());
+            }
             return Err(
                 "quota: endpoint must use https:// so the connection to Limitador is \
                  encrypted; set insecure_http: true to allow http:// for a localhost or \
@@ -122,7 +129,10 @@ impl QuotaConfig {
                     .to_owned(),
             );
         }
-        Ok(())
+        Err(format!(
+            "quota: endpoint '{endpoint}' must be an https:// URL (or http:// with \
+             insecure_http: true)"
+        ))
     }
 
     /// The configured per-call HTTP timeout as a [`Duration`].
@@ -211,6 +221,20 @@ mod tests {
         config_with_endpoint("http://localhost:8080", true)
             .validate()
             .unwrap();
+    }
+
+    #[test]
+    fn a_non_http_scheme_is_rejected_even_with_insecure_http() {
+        // Fail at construction, not at the connector where a Connect error
+        // would ride on_error: allow.
+        for endpoint in [
+            "ftp://limitador:21",
+            "limitador:8080",
+            "unix:///run/lim.sock",
+        ] {
+            let err = config_with_endpoint(endpoint, true).validate().unwrap_err();
+            assert!(err.contains("https://"), "{endpoint}: {err}");
+        }
     }
 
     #[test]
