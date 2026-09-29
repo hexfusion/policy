@@ -215,7 +215,11 @@ impl QuotaBackend for LimitadorClient {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used, reason = "tests")]
+#[expect(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "tests assert HTTP outcomes"
+)]
 mod tests {
     use super::*;
     use std::sync::Arc;

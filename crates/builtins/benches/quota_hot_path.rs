@@ -13,12 +13,9 @@
 //!
 //! Run with `cargo bench -p praxis-policy-builtins --features experimental-quota`.
 
-#![allow(
-    missing_docs,
+#![expect(
     clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "benchmark harness"
+    reason = "benchmark setup must construct a valid fixture"
 )]
 
 use std::sync::Arc;

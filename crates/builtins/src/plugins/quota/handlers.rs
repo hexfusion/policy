@@ -475,11 +475,10 @@ fn resolve_identity<'a>(
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::expect_used,
     clippy::unwrap_used,
-    clippy::panic,
-    reason = "tests"
+    reason = "tests assert pending debit and identity state"
 )]
 mod tests {
     use super::*;

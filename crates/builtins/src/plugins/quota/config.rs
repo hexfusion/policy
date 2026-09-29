@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 // would otherwise key budgets on the wrong claim or silently fail open.
 #[serde(deny_unknown_fields)]
 pub struct QuotaConfig {
-    /// Limitador base URL, e.g. `http://limitador.grid-system.svc:8080`.
+    /// Limitador base URL, e.g. `https://limitador.grid-system.svc:8443`.
     /// The plugin POSTs to `{endpoint}/check` and `{endpoint}/report`.
     pub endpoint: String,
 
@@ -34,14 +34,16 @@ pub struct QuotaConfig {
     #[serde(default = "default_identity_claim")]
     pub identity_claim: String,
 
-    /// What to do when the Limitador call fails (unreachable, timeout, or a
-    /// non-check status). `deny` (default) refuses, `allow` serves. Governs
-    /// only transport failures, never an over-budget verdict.
+    /// What to do on a timeout, connect or I/O error, oversized response, or
+    /// Limitador 5xx. `deny` (default) refuses, `allow` serves. Unexpected
+    /// non-5xx statuses, egress denials, and over-budget verdicts fail closed
+    /// regardless.
     #[serde(default)]
     pub on_error: OnErrorMode,
 
     /// Per-call HTTP timeout in seconds, so a slow Limitador fails fast into
-    /// the `on_error` path rather than stalling the request. Default 5.
+    /// the `on_error` path rather than stalling the request. Must be nonzero;
+    /// default 5.
     #[serde(default = "default_timeout_seconds")]
     pub timeout_seconds: u64,
 
@@ -96,13 +98,12 @@ fn default_missing_usage_charge() -> u64 {
 }
 
 impl QuotaConfig {
-    /// Reject an empty `endpoint` or `namespace` at construction.
+    /// Reject invalid configuration at construction.
     ///
     /// # Errors
     ///
-    /// A message when `endpoint` or `namespace` is empty, when `endpoint` is a
-    /// plaintext `http://` URL and `insecure_http` is not set, or when it uses
-    /// any scheme other than `https://` or `http://`.
+    /// A message when `endpoint` or `namespace` is empty, a charge or timeout
+    /// is zero, or the endpoint scheme is disallowed.
     pub fn validate(&self) -> Result<(), String> {
         let endpoint = self.endpoint.trim();
         if endpoint.is_empty() {
@@ -113,6 +114,9 @@ impl QuotaConfig {
         }
         if self.missing_usage_charge == 0 {
             return Err("quota: missing_usage_charge must be greater than zero".to_owned());
+        }
+        if self.timeout_seconds == 0 {
+            return Err("quota: timeout_seconds must be greater than zero".to_owned());
         }
         // Allowlist, secure by default: https lets the host transport encrypt
         // the connection. Any other scheme fails here at construction rather
@@ -145,7 +149,10 @@ impl QuotaConfig {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used, reason = "tests")]
+#[expect(
+    clippy::unwrap_used,
+    reason = "tests assert deserialization and validation results"
+)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -273,5 +280,13 @@ mod tests {
         cfg.missing_usage_charge = 0;
         let err = cfg.validate().unwrap_err();
         assert!(err.contains("missing_usage_charge"), "{err}");
+    }
+
+    #[test]
+    fn a_zero_timeout_is_rejected() {
+        let mut cfg = config_with_endpoint("https://lim:8443", false);
+        cfg.timeout_seconds = 0;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("timeout_seconds"), "{err}");
     }
 }

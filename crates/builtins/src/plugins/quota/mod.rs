@@ -9,8 +9,9 @@
 //! Stability: experimental (`experimental-quota` feature). Not covered by semver;
 //! not for production.
 //!
-//! Config must declare `capabilities: [read_subject]`, plus `read_claims` for a
-//! claim key. An undeclared identity filters to `None` and nothing meters.
+//! Config must declare `capabilities: [read_subject, perform_http]`, plus
+//! `read_claims` for a non-`sub` claim. Without a resolved identity the check
+//! denies with `quota.no_identity` unless `allow_unauthenticated` is enabled.
 //!
 //! Trust boundary: the debited amount is the upstream's self-reported usage.
 //! When usage cannot be determined (streaming, or an absent field) the plugin
@@ -60,5 +61,6 @@ mod client;
 pub use config::{OnErrorMode, QuotaConfig};
 pub use factory::{KIND, QuotaFactory};
 pub use handlers::{
-    CODE_QUOTA_BACKEND_UNAVAILABLE, CODE_QUOTA_EXHAUSTED, Quota, QuotaCheck, QuotaReport,
+    CODE_QUOTA_BACKEND_UNAVAILABLE, CODE_QUOTA_EGRESS_DENIED, CODE_QUOTA_EXHAUSTED,
+    CODE_QUOTA_NO_IDENTITY, CODE_QUOTA_UNSETTLED_DEBIT, Quota, QuotaCheck, QuotaReport,
 };

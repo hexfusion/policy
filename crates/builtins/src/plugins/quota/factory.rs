@@ -71,7 +71,11 @@ impl PluginFactory for QuotaFactory {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
+#[expect(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "tests inspect factory output"
+)]
 mod tests {
     use super::*;
 

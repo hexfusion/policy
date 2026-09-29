@@ -30,14 +30,14 @@ Written under `plugins[<name>].config`.
 | `namespace` | string | required | Limitador limit namespace the counters live under, e.g. `grid-tokens`. The budget value itself lives in Limitador's `limits.yaml`, not here. |
 | `identity_claim` | string | `sub` | Which resolved-identity value keys the budget, and the Limitador descriptor key. `sub` reads the authenticated subject id. Must be a verified, always-present claim (see Identity). |
 | `on_error` | `deny` \| `allow` | `deny` | What to do when a Limitador call fails for a transient reason (timeout, refused connection, dropped socket, oversize response, or a 5xx). `deny` fails closed, `allow` serves. Never governs an over-budget verdict or a Limitador status other than 5xx. A connect failure counts as transient even when its cause is permanent (an untrusted certificate, a wrong host, a wrong port), so under `allow` such a misconfiguration serves unmetered (see Failure behavior). |
-| `timeout_seconds` | integer | `5` | Per-call HTTP timeout, so a slow Limitador fails fast into the failure path rather than stalling the request. |
+| `timeout_seconds` | integer | `5` | Nonzero per-call HTTP timeout, so a slow Limitador fails fast into the failure path rather than stalling the request. |
 | `missing_usage_charge` | integer | `1000` | Tokens debited when usage cannot be determined (a streamed response, or a provider without typed usage). Non-zero so the balance still moves; over-charge is the fail-closed direction. Size it at or above the largest response a principal may draw (see Usage metering). |
 | `insecure_http` | bool | `false` | Allow a plaintext `http://` endpoint. Default requires `https://` so the host transport encrypts the connection to Limitador. Set `true` only for a localhost or demo Limitador with no TLS; the principal's subject id then crosses the network in cleartext (see Security requirements). |
 | `allow_unauthenticated` | bool | `false` | Whether to serve a request that carries no resolved identity. Default denies (nothing to meter, so fail closed). Set `true` only when authentication is enforced upstream and an unauthenticated request should pass unmetered by design. Every such request then logs a warning. |
 
-`endpoint` and `namespace` must be non-empty, and `missing_usage_charge` must
-be greater than zero, or the plugin fails to construct. An unknown config key
-is rejected rather than ignored.
+`endpoint` and `namespace` must be non-empty; `timeout_seconds` and
+`missing_usage_charge` must be greater than zero. Invalid values or unknown
+config keys fail plugin construction.
 
 ## Usage metering
 

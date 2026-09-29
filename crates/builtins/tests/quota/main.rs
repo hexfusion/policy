@@ -9,11 +9,10 @@
 //! through the host transport rather than a mock server, so the same
 //! `perform_http` seam the plugin uses in production is what the tests drive.
 
-#![allow(
+#![expect(
     clippy::expect_used,
-    clippy::unwrap_used,
     clippy::panic,
-    reason = "tests"
+    reason = "integration tests assert quota outcomes"
 )]
 
 use std::sync::{Arc, Mutex};
