@@ -73,6 +73,38 @@ present on an authenticated request. `sub` is the only safe default. It reads
 the authenticated subject id. A client-supplied claim can be dropped or forged
 to change the descriptor the budget is keyed on, so do not key a budget on one.
 
+## Security requirements
+
+This plugin meters a principal identified only by its subject id. It sends no
+credential of its own to Limitador and trusts the deployment to establish who
+the caller is and to protect the counter. Three controls are required for the
+budget to mean anything.
+
+Authenticate before this plugin runs. The budget is keyed on the resolved
+subject id, which an upstream identity plugin or the gateway must have verified.
+With `allow_unauthenticated: false` (the default) an unresolved identity denies,
+but the plugin cannot tell a forged subject from a real one; that is the
+authenticator's job.
+
+Isolate each issuer in its own Limitador namespace. Counters are keyed by
+subject id within a namespace, and a subject id is unique only within its
+issuer. Two issuers that mint the same `sub` under one `namespace` share a
+budget, so one tenant's spend can exhaust another's. Give each issuer its own
+`namespace`.
+
+Secure the connection to Limitador. The plugin identifies a principal by its
+plaintext subject id in the request body and sends no credential, so any
+workload that can reach Limitador can debit or check any principal: a
+`POST /report` with a victim's subject id drains that victim's budget. Restrict
+who can reach Limitador and authenticate the connection with mTLS or an
+equivalent. The transport is the host's (see Deployment), so mTLS, the CA trust
+store and any client certificate are configured on the host transport, not in
+this plugin.
+
+The plugin reads only the subject id it keys on, never a credential.
+`read_subject` exposes that id; `read_claims`, required for a non-`sub`
+`identity_claim`, also exposes the subject id.
+
 ## Deployment
 
 The check and debit run through the host HTTP transport, which enforces the
