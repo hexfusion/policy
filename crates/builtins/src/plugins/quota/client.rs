@@ -16,7 +16,6 @@ use praxis_policy_core::hooks::Extensions;
 use praxis_policy_core::host::HostServices as _;
 use praxis_policy_core::http::HttpRequest;
 use praxis_policy_core::http_retry::RetryPolicy;
-use serde::ser::SerializeMap as _;
 use serde::{Serialize, Serializer};
 
 use praxis_policy_core::host::HttpRequestError;
@@ -53,9 +52,7 @@ struct Descriptor<'a> {
 
 impl Serialize for Descriptor<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut map = serializer.serialize_map(Some(1))?;
-        map.serialize_entry(self.key, self.value)?;
-        map.end()
+        serializer.collect_map(std::iter::once((self.key, self.value)))
     }
 }
 
