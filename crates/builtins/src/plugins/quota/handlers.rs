@@ -443,24 +443,6 @@ fn number_as_u64(value: &serde_json::Value) -> Option<u64> {
     value.as_str().and_then(|s| s.trim().parse::<u64>().ok())
 }
 
-/// The per-request hot-path functions, exposed for the microbenchmark under
-/// the `bench` feature. Not part of the plugin API in a normal build.
-#[cfg(feature = "bench")]
-pub mod bench {
-    use super::Extensions;
-    use std::borrow::Cow;
-
-    /// Benchmark wrapper over the crate-private `resolve_identity`.
-    pub fn resolve_identity<'a>(ext: &'a Extensions, identity_claim: &str) -> Option<Cow<'a, str>> {
-        super::resolve_identity(ext, identity_claim)
-    }
-
-    /// Benchmark wrapper over the crate-private `extract_usage`.
-    pub fn extract_usage(body: &str, path: &str) -> Option<u64> {
-        super::extract_usage(body, path)
-    }
-}
-
 #[cfg(test)]
 #[allow(
     clippy::expect_used,

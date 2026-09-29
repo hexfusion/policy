@@ -57,10 +57,6 @@ valkey = [
 ]
 secrets-vault = ["_engine-core", "_secrets"]
 
-# Exposes the quota plugin's hot-path functions for its microbenchmark. Off by
-# default; paired with `experimental-quota` by the `[[bench]]` target below.
-bench = []
-
 # Private upstream-edge markers. Each engine dependency is named in exactly one
 # place, so changing how an edge is declared is a one-line edit rather than five.
 _engine-core = ["dep:praxis-policy-core"]
@@ -310,9 +306,10 @@ rand = "0.8"
 testcontainers-modules = { version = "0.15", features = ["valkey"] }
 testcontainers = "0.27"
 
-# Hot-path microbenchmark harness for the quota plugin, behind the `bench`
-# feature. Light dep tree, so it stays a dev-dependency.
-divan = "0.1"
+# Criterion drives the quota plugin's added-latency benchmark, matching the
+# workspace standard (ppe-benches). `async_tokio` (set in the workspace dep)
+# lets it await the async hook handlers.
+criterion = { workspace = true }
 
 # One harness per extension, each gated on its own single feature.
 # `required-features` is all-or-nothing, so a harness covering several
@@ -368,7 +365,7 @@ required-features = ["experimental-quota"]
 name = "quota_hot_path"
 path = "benches/quota_hot_path.rs"
 harness = false
-required-features = ["experimental-quota", "bench"]
+required-features = ["experimental-quota"]
 
 [lints]
 workspace = true
