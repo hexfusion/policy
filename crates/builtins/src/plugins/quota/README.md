@@ -45,6 +45,24 @@ to zero. Accurate metering therefore requires the gateway to populate typed
 usage on the completion extension; without it every response debits the flat
 fallback.
 
+### Streaming
+
+A streamed response usually carries no typed usage, so its debit falls to
+`missing_usage_charge`. This closes the free-request hole (a stream is never
+charged nothing) and its fail-closed direction is over-charge, but it is not
+accurate metering: if the fallback is smaller than a stream's real token count,
+that stream under-meters. Two conditions keep it from bypassing the budget: size
+`missing_usage_charge` at or above the largest response a principal may draw, and
+prefer a gateway that aggregates streamed usage into the typed completion usage
+(OpenAI's `stream_options: {include_usage: true}`, for example), which routes the
+stream back through the exact typed path.
+
+The plugin cannot fail a streamed request closed on its own. The pre-invoke check
+sees a normalized CMF message, not the raw request, so it has no `stream` flag to
+gate on, and the post-invoke debit cannot deny once the response has begun.
+Fail-closed-on-stream would need the gateway to surface a stream signal the check
+could read; until then, size the fallback and populate typed usage.
+
 ## Capabilities
 
 The plugin needs all three. A missing `perform_http` always fails closed:

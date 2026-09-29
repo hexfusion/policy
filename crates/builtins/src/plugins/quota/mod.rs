@@ -15,7 +15,12 @@
 //! Trust boundary: the debited amount is the upstream's self-reported usage.
 //! When usage cannot be determined (streaming, or an absent field) the plugin
 //! debits a conservative `missing_usage_charge`, not nothing, so the balance
-//! always moves. `identity_claim` must name a verified subject id.
+//! always moves. A streamed response typically has no typed usage, so it debits
+//! that fallback; it never rides free, but it under-meters if the fallback is
+//! below the stream's real usage. The check cannot fail a stream closed (the CMF
+//! payload carries no request `stream` flag), so accurate stream metering needs
+//! the gateway to aggregate streamed usage into the typed completion usage.
+//! `identity_claim` must name a verified subject id.
 //!
 //! Fail-closed reconciliation: the post-invoke `/report` is dispatched off the
 //! response path, so a slow Limitador does not hold the response. A failed
