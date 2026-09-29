@@ -16,7 +16,8 @@ use praxis_policy_core::hooks::Extensions;
 use praxis_policy_core::host::HostServices as _;
 use praxis_policy_core::http::HttpRequest;
 use praxis_policy_core::http_retry::RetryPolicy;
-use serde_json::json;
+use serde::ser::SerializeMap as _;
+use serde::{Serialize, Serializer};
 
 use praxis_policy_core::host::HttpRequestError;
 use praxis_policy_core::http::HttpTransportError;
@@ -33,6 +34,30 @@ const STATUS_OK: u16 = 200;
 
 /// Over-budget verdict from `/check`.
 const STATUS_TOO_MANY_REQUESTS: u16 = 429;
+
+/// A Limitador `/check` or `/report` body. Serialized straight to the request
+/// bytes, so the per-request path never builds an intermediate `serde_json::Value`.
+#[derive(Serialize)]
+struct LimitadorRequest<'a> {
+    namespace: &'a str,
+    values: Descriptor<'a>,
+    delta: u64,
+}
+
+/// The single `{key: value}` descriptor map Limitador keys the counter on.
+/// A one-entry map serialized inline, without a `HashMap` allocation.
+struct Descriptor<'a> {
+    key: &'a str,
+    value: &'a str,
+}
+
+impl Serialize for Descriptor<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(1))?;
+        map.serialize_entry(self.key, self.value)?;
+        map.end()
+    }
+}
 
 /// Bound to one Limitador endpoint and namespace. Holds no HTTP client: the
 /// transport arrives per call as `&Extensions`.
@@ -63,7 +88,7 @@ impl LimitadorClient {
         &self,
         ext: &Extensions,
         url: &str,
-        body: &serde_json::Value,
+        body: &LimitadorRequest<'_>,
     ) -> Result<u16, BackendError> {
         let encoded = serde_json::to_vec(body).map_err(|e| BackendError {
             message: format!("Limitador request body could not be encoded: {e}"),
@@ -146,11 +171,14 @@ impl QuotaBackend for LimitadorClient {
         descriptor_key: &str,
         descriptor_value: &str,
     ) -> Result<CheckOutcome, BackendError> {
-        let body = json!({
-            "namespace": self.namespace,
-            "values": { descriptor_key: descriptor_value },
-            "delta": CHECK_PROBE_DELTA,
-        });
+        let body = LimitadorRequest {
+            namespace: &self.namespace,
+            values: Descriptor {
+                key: descriptor_key,
+                value: descriptor_value,
+            },
+            delta: CHECK_PROBE_DELTA,
+        };
         let status = self.send(ext, &self.check_url, &body).await?;
         match status {
             STATUS_OK => Ok(CheckOutcome::WithinLimit),
@@ -169,11 +197,14 @@ impl QuotaBackend for LimitadorClient {
         descriptor_value: &str,
         delta: u64,
     ) -> Result<(), BackendError> {
-        let body = json!({
-            "namespace": self.namespace,
-            "values": { descriptor_key: descriptor_value },
-            "delta": delta,
-        });
+        let body = LimitadorRequest {
+            namespace: &self.namespace,
+            values: Descriptor {
+                key: descriptor_key,
+                value: descriptor_value,
+            },
+            delta,
+        };
         let status = self.send(ext, &self.report_url, &body).await?;
         if status == STATUS_OK {
             return Ok(());
