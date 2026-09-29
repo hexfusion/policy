@@ -158,6 +158,25 @@ impl Quota {
         entry.delta = entry.delta.saturating_add(delta);
     }
 
+    /// Report `total` tokens for `principal`, recording a pending debit on
+    /// failure for the next admission to re-report. Spawned off the response
+    /// path by the post-invoke handler, so a slow `/report` never adds its
+    /// round trip to the response tail.
+    async fn debit(&self, ext: &Extensions, principal: &str, total: u64) {
+        if let Err(e) = self
+            .backend
+            .report(ext, &self.typed.identity_claim, principal, total)
+            .await
+        {
+            tracing::warn!(
+                error = %e,
+                delta = total,
+                "quota: token debit failed; recorded for retry, principal denied until it settles"
+            );
+            self.record_failed_debit(principal, total);
+        }
+    }
+
     /// Flush a principal's pending debit before admitting. The lock is dropped
     /// across the `/report` await; a concurrent flush is denied, not re-reported.
     async fn flush_pending(&self, ext: &Extensions, claim: &str, principal: &str) -> FlushOutcome {
@@ -387,20 +406,20 @@ impl HookHandler<CmfHook> for QuotaReport {
             return PluginResult::allow();
         }
 
-        if let Err(e) = self
-            .core
-            .backend
-            .report(extensions, claim, &sub, total)
-            .await
-        {
-            // Debit did not land: record it for the next admission to re-report.
-            tracing::warn!(
-                error = %e,
-                delta = total,
-                "quota: token debit failed; recorded for retry, principal denied until it settles"
-            );
-            self.core.record_failed_debit(&sub, total);
-        }
+        // Debit off the response path. A slow /report would otherwise add its
+        // round trip to the response tail (up to timeout_seconds), so spawn it.
+        // A failed debit is recorded as pending and re-reported by the next
+        // admission, which denies until it lands, so the fail-closed guarantee
+        // survives the report being asynchronous. Only the CHECK is synchronous.
+        let core = Arc::clone(&self.core);
+        let report_ext = Extensions {
+            http_transport: extensions.http_transport.clone(),
+            ..Default::default()
+        };
+        let principal = sub.into_owned();
+        tokio::spawn(async move {
+            core.debit(&report_ext, &principal, total).await;
+        });
         PluginResult::allow()
     }
 }

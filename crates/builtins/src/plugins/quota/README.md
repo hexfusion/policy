@@ -149,8 +149,13 @@ The check path is the gate. Its outcomes:
 `on_error` governs only the last row. Every permanent fault fails closed on its
 own, so a misconfiguration cannot silently stop enforcement.
 
-The debit path (`cmf.llm_output`) never denies. The response is already out, so
-a failed debit is logged and the balance lags rather than blocking the request.
+The debit path (`cmf.llm_output`) never denies, and it runs off the response
+path: the `/report` call is dispatched asynchronously so a slow Limitador does
+not add its round trip to the response tail. A failed debit is recorded as a
+per-principal pending debit and re-reported by the next admission, which is
+denied (`quota.unsettled_debit`) until it lands. So the debit is best-effort for
+latency but still fail-closed for correctness.
+
 Neither call retries: `/report` increments unconditionally, so a repeat would
 double-charge, and `/check` skips retry to keep tail latency off the admission
 path.

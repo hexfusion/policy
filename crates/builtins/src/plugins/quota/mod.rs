@@ -17,8 +17,10 @@
 //! debits a conservative `missing_usage_charge`, not nothing, so the balance
 //! always moves. `identity_claim` must name a verified subject id.
 //!
-//! Fail-closed reconciliation: a failed `/report` is recorded per principal and
-//! re-reported on the next admission, which is denied until it lands. Limitador
+//! Fail-closed reconciliation: the post-invoke `/report` is dispatched off the
+//! response path, so a slow Limitador does not hold the response. A failed
+//! `/report` is recorded per principal and re-reported on the next admission,
+//! which is denied until it lands. Limitador
 //! `/report` is not idempotent, so a retry after an ambiguous loss may over-charge
 //! (the safe direction). The guard state is in-process: lost on restart and not
 //! shared across replicas, so the residual leak is bounded per replica, not the

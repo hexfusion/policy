@@ -9,7 +9,12 @@
 //! through the host transport rather than a mock server, so the same
 //! `perform_http` seam the plugin uses in production is what the tests drive.
 
-#![allow(clippy::expect_used, clippy::unwrap_used, reason = "tests")]
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "tests"
+)]
 
 use std::sync::{Arc, Mutex};
 
@@ -92,6 +97,20 @@ fn output_payload(body: &str) -> MessagePayload {
     MessagePayload {
         message: Message::text(Role::Assistant, body),
     }
+}
+
+/// Poll `cond` until it holds, yielding so the spawned debit task can run. The
+/// post-invoke debit is fire-and-forget, so a test asserting on its /report
+/// call waits for it rather than racing it. Panics if it never holds, so a real
+/// regression fails instead of hanging.
+async fn eventually(mut cond: impl FnMut() -> bool) {
+    for _ in 0..500 {
+        if cond() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    panic!("condition never became true");
 }
 
 #[tokio::test]
@@ -248,6 +267,7 @@ async fn report_debits_the_fallback_when_typed_usage_absent() {
         )
         .await;
     assert!(!result.is_denied(), "an absent total must never deny");
+    eventually(|| t.call_count_for("/report") == 1).await;
     let sent =
         String::from_utf8_lossy(&t.last_request().expect("a fallback debit").body).into_owned();
     assert!(sent.contains(r#""delta":1000"#), "{sent}");
@@ -286,6 +306,8 @@ async fn a_failed_debit_denies_until_it_settles() {
         )
         .await;
     assert!(!out.is_denied(), "the report hook never denies");
+    // The debit is spawned; wait for the failed /report to land and be recorded.
+    eventually(|| t_fail.call_count_for("/report") == 1).await;
 
     // Next admission: the flush still fails, so deny (fail-closed) without even
     // running the check probe.
@@ -353,6 +375,8 @@ async fn a_cancelled_flush_does_not_wedge_the_principal() {
         )
         .await;
     assert!(!out.is_denied());
+    // The debit is spawned; wait for the failed /report to land and be recorded.
+    eventually(|| t_fail.call_count_for("/report") == 1).await;
 
     // Start a flush whose report hangs, then cancel it by dropping the future.
     let check = QuotaCheck::new(Arc::clone(&core));
@@ -406,6 +430,7 @@ async fn report_debits_the_typed_completion_usage() {
         )
         .await;
     assert!(!result.is_denied());
+    eventually(|| t.call_count_for("/report") == 1).await;
     let sent = String::from_utf8_lossy(&t.last_request().expect("a debit").body).into_owned();
     assert!(sent.contains(r#""delta":25"#), "{sent}");
     assert!(sent.contains(r#""sub":"alice""#), "{sent}");
@@ -426,6 +451,7 @@ async fn report_ignores_the_response_body_and_uses_typed_usage() {
         )
         .await;
     assert!(!result.is_denied());
+    eventually(|| t.call_count_for("/report") == 1).await;
     let sent = String::from_utf8_lossy(&t.last_request().expect("a debit").body).into_owned();
     assert!(sent.contains(r#""delta":25"#), "{sent}");
 }
@@ -552,6 +578,7 @@ async fn check_fails_closed_on_a_config_error_4xx_even_under_on_error_allow() {
 struct CountingLimitador {
     counter: Mutex<u64>,
     max: u64,
+    reports: std::sync::atomic::AtomicU64,
 }
 
 impl CountingLimitador {
@@ -559,7 +586,14 @@ impl CountingLimitador {
         Self {
             counter: Mutex::new(0),
             max,
+            reports: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// How many /report calls have landed, so a test can wait for the spawned
+    /// debit before the next check reads the counter.
+    fn reports_seen(&self) -> u64 {
+        self.reports.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn delta(body: &Bytes) -> u64 {
@@ -582,6 +616,8 @@ impl HttpTransport for CountingLimitador {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if req.url.contains("/report") {
                 *counter += delta;
+                self.reports
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 200
             } else if *counter + delta > self.max {
                 429
@@ -599,12 +635,13 @@ async fn a_principal_is_denied_once_cumulative_debits_reach_the_budget() {
     // debit, so counters 0, 40, 80 all admit. The debits carry the counter
     // to 120, and the fourth check refuses. This drives the whole loop the
     // plugin exists to close, against a Limitador that counts.
-    let t: Arc<dyn HttpTransport> = Arc::new(CountingLimitador::new(100));
+    let lim = Arc::new(CountingLimitador::new(100));
+    let t: Arc<dyn HttpTransport> = lim.clone();
     let check = QuotaCheck::new(core("deny"));
     let report = QuotaReport::new(core("deny"));
     let mut ctx = PluginContext::new();
 
-    for round in 0..3 {
+    for round in 0..3_u64 {
         let admitted = check
             .handle(
                 &input_payload(),
@@ -621,6 +658,8 @@ async fn a_principal_is_denied_once_cumulative_debits_reach_the_budget() {
             )
             .await;
         assert!(!debit.is_denied(), "the report hook never denies");
+        // The debit is spawned; the counter must catch up before the next check.
+        eventually(|| lim.reports_seen() == round + 1).await;
     }
 
     let denied = check
