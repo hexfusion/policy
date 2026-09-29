@@ -325,6 +325,21 @@ pub fn install_default_http_transport(mgr: &std::sync::Arc<PolicyEngine>) -> boo
     mgr.set_http_transport(std::sync::Arc::new(http_hyper::HyperTransport::new()))
 }
 
+/// Register the enabled builtins and use hyper when the host has not already
+/// installed an HTTP transport.
+///
+/// Call [`PolicyEngine::set_http_transport`] first when the host has its own
+/// transport. This helper keeps that transport and returns `false`; otherwise
+/// it installs the bundled hyper transport and returns `true`. The bundled
+/// transport refuses private destinations by default, so an in-cluster
+/// Limitador needs a host transport configured to permit that destination.
+#[cfg(all(feature = "_builtin", feature = "http-hyper"))]
+pub fn install_builtins_with_default_http_transport(mgr: &std::sync::Arc<PolicyEngine>) -> bool {
+    let installed = install_default_http_transport(mgr);
+    install_builtins(mgr);
+    installed
+}
+
 #[cfg(all(test, feature = "_builtin"))]
 mod tests {
     use super::*;
@@ -334,6 +349,19 @@ mod tests {
     fn install_builtins_runs_without_panic() {
         let mgr = Arc::new(PolicyEngine::default());
         install_builtins(&mgr);
+    }
+
+    #[cfg(feature = "http-hyper")]
+    #[test]
+    fn combined_bootstrap_installs_hyper_only_without_an_injected_transport() {
+        let standalone = Arc::new(PolicyEngine::default());
+        assert!(install_builtins_with_default_http_transport(&standalone));
+
+        let embedded = Arc::new(PolicyEngine::default());
+        assert!(embedded.set_http_transport(Arc::new(
+            HyperTransport::new().with_allow_private_destinations()
+        )));
+        assert!(!install_builtins_with_default_http_transport(&embedded));
     }
 
     #[test]

@@ -35,8 +35,9 @@ Written under `plugins[<name>].config`.
 | `insecure_http` | bool | `false` | Allow a plaintext `http://` endpoint. Default requires `https://` so the host transport encrypts the connection to Limitador. Set `true` only for a localhost or demo Limitador with no TLS; the principal's subject id then crosses the network in cleartext (see Security requirements). |
 | `allow_unauthenticated` | bool | `false` | Whether to serve a request that carries no resolved identity. Default denies (nothing to meter, so fail closed). Set `true` only when authentication is enforced upstream and an unauthenticated request should pass unmetered by design. Every such request then logs a warning. |
 
-`endpoint` and `namespace` must be non-empty or the plugin fails to construct.
-An unknown config key is rejected rather than ignored.
+`endpoint` and `namespace` must be non-empty, and `missing_usage_charge` must
+be greater than zero, or the plugin fails to construct. An unknown config key
+is rejected rather than ignored.
 
 ## Usage metering
 
@@ -46,10 +47,10 @@ token count. The `cmf.llm_output` message carries the model's generated text,
 not the provider's usage block, so a body total would meter on model output and
 is easy to forge.
 
-When typed usage is absent the debit falls back to `missing_usage_charge`, never
-to zero. Accurate metering therefore requires the gateway to populate typed
-usage on the completion extension; without it every response debits the flat
-fallback.
+When typed usage is absent or reports zero, the debit falls back to
+`missing_usage_charge`. Accurate metering therefore requires the gateway to
+populate typed usage on the completion extension; without it every response
+debits the flat fallback.
 
 ### Streaming
 
@@ -103,6 +104,19 @@ plugins:
 
 The plugin registers both hooks itself; the `hooks` list in config has no
 effect.
+
+### Host HTTP transport
+
+For a standalone host, enable `experimental-quota` and `http-hyper`, then call
+`praxis_policy::install_builtins_with_default_http_transport(&engine)` before
+loading the policy. It installs hyper when no transport has been injected. A
+host with its own transport calls `engine.set_http_transport(...)` first; the
+helper keeps that transport.
+
+The bundled hyper default refuses private destinations. For an in-cluster
+Limitador, inject a host transport with a scoped egress allowance for its
+address before calling the helper. `HyperTransport::with_allow_private_destinations`
+is available for controlled environments, but permits every private address.
 
 ## Identity
 

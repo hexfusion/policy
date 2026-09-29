@@ -219,7 +219,13 @@ impl Quota {
                 match result {
                     Ok(()) => {
                         p.delta = p.delta.saturating_sub(attempted);
-                        FlushOutcome::Proceed
+                        if p.delta == 0 {
+                            FlushOutcome::Proceed
+                        } else {
+                            // Another debit failed while this report was in
+                            // flight. It still needs to land before admission.
+                            FlushOutcome::Deny
+                        }
                     },
                     Err(_) => FlushOutcome::Deny,
                 }
@@ -428,10 +434,8 @@ impl HookHandler<CmfHook> for QuotaReport {
             .as_ref()
             .and_then(|c| c.tokens.as_ref())
             .map(|t| u64::from(t.total_tokens))
+            .filter(|total| *total > 0)
             .unwrap_or(self.core.typed.missing_usage_charge);
-        if total == 0 {
-            return PluginResult::allow();
-        }
 
         // Debit off the response path so a slow /report does not hold the
         // response. The response is released before the debit lands, so the
@@ -479,7 +483,63 @@ fn resolve_identity<'a>(
 )]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use praxis_policy_core::extensions::{SecurityExtension, SubjectExtension};
+    use praxis_policy_core::host::HttpTransportSlot;
+    use praxis_policy_core::http::{HttpRequest, HttpResponse, HttpTransport, HttpTransportError};
+    use tokio::sync::Notify;
+
+    #[derive(Debug, Default)]
+    struct PausedReport {
+        entered: Notify,
+        resume: Notify,
+    }
+
+    #[async_trait]
+    impl HttpTransport for PausedReport {
+        async fn execute(&self, req: HttpRequest) -> Result<HttpResponse, HttpTransportError> {
+            if req.url.ends_with("/report") {
+                self.entered.notify_one();
+                self.resume.notified().await;
+            }
+            Ok(HttpResponse::new(200, Bytes::new()))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_new_failed_debit_during_a_flush_still_blocks_admission() {
+        let cfg = PluginConfig {
+            name: "token-quota".into(),
+            config: Some(serde_json::json!({
+                "endpoint": "http://limitador.test",
+                "namespace": "grid-tokens",
+                "insecure_http": true,
+            })),
+            ..Default::default()
+        };
+        let core = Arc::new(Quota::new(cfg).unwrap());
+        core.record_failed_debit("bob", 11);
+
+        let paused = Arc::new(PausedReport::default());
+        let transport: Arc<dyn HttpTransport> = paused.clone();
+        let ext = Extensions {
+            http_transport: HttpTransportSlot::installed(transport),
+            ..Default::default()
+        };
+        let flushing = tokio::spawn({
+            let core = Arc::clone(&core);
+            async move { core.flush_pending(&ext, "sub", "bob").await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), paused.entered.notified())
+            .await
+            .expect("the first debit reaches the transport");
+
+        core.record_failed_debit("bob", 20);
+        paused.resume.notify_one();
+
+        assert!(matches!(flushing.await.unwrap(), FlushOutcome::Deny));
+        assert_eq!(core.pending().get("bob").unwrap().delta, 20);
+    }
 
     fn security_with_sub(id: &str) -> Extensions {
         Extensions {

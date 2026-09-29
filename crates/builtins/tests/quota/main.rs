@@ -5,7 +5,7 @@
 //!
 //! The rows the plugin exists to get right: over budget denies, under budget
 //! allows, an unreachable or ungranted Limitador honors `on_error`, and an
-//! output with no usage debits nothing and never denies. Limitador is scripted
+//! output with no usage debits a fallback and never denies. Limitador is scripted
 //! through the host transport rather than a mock server, so the same
 //! `perform_http` seam the plugin uses in production is what the tests drive.
 
@@ -268,6 +268,24 @@ async fn report_debits_the_fallback_when_typed_usage_absent() {
         )
         .await;
     assert!(!result.is_denied(), "an absent total must never deny");
+    eventually(|| t.call_count_for("/report") == 1).await;
+    let sent =
+        String::from_utf8_lossy(&t.last_request().expect("a fallback debit").body).into_owned();
+    assert!(sent.contains(r#""delta":1000"#), "{sent}");
+}
+
+#[tokio::test]
+async fn report_debits_the_fallback_when_typed_usage_is_zero() {
+    let t = Arc::new(FakeTransport::new().json("/report", 200, ""));
+    let handler = QuotaReport::new(core("deny"));
+    let result = handler
+        .handle(
+            &output_payload("done"),
+            &ext_with_sub_and_usage("bob", 0, as_transport(&t)),
+            &mut PluginContext::new(),
+        )
+        .await;
+    assert!(!result.is_denied());
     eventually(|| t.call_count_for("/report") == 1).await;
     let sent =
         String::from_utf8_lossy(&t.last_request().expect("a fallback debit").body).into_owned();

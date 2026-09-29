@@ -111,6 +111,9 @@ impl QuotaConfig {
         if self.namespace.trim().is_empty() {
             return Err("quota: namespace must be non-empty".to_owned());
         }
+        if self.missing_usage_charge == 0 {
+            return Err("quota: missing_usage_charge must be greater than zero".to_owned());
+        }
         // Allowlist, secure by default: https lets the host transport encrypt
         // the connection. Any other scheme fails here at construction rather
         // than at the connector, where a Connect error would ride on_error.
@@ -262,5 +265,13 @@ mod tests {
         cfg.namespace = "   ".to_owned();
         let err = cfg.validate().unwrap_err();
         assert!(err.contains("namespace"), "{err}");
+    }
+
+    #[test]
+    fn a_zero_missing_usage_charge_is_rejected() {
+        let mut cfg = config_with_endpoint("https://lim:8443", false);
+        cfg.missing_usage_charge = 0;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("missing_usage_charge"), "{err}");
     }
 }
