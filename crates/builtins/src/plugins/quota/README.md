@@ -4,15 +4,21 @@ A per-principal token budget, enforced as a policy against a standalone
 [Limitador](https://github.com/Kuadrant/limitador). The plugin registers two
 hooks: a pre-invoke check on `cmf.llm_input` that admits or refuses a request,
 and a post-invoke debit on `cmf.llm_output` that charges the tokens the
-response used. The counter lives in Limitador, so the budget persists across
-restarts and across replicas.
+response used. The counter lives in Limitador, so the budget itself persists
+across restarts and across replicas. The plugin's pending-debit state (see
+Failure behavior) does not: it is per replica and in process, so it is lost on
+restart and not shared between replicas.
 
 The budget is a soft cap. The check probes with a delta of one and charges
-nothing. The debit records the real spend after the response. Concurrent
-requests for the same principal each pass their own check before those debits
-land, so a burst can exceed the budget by roughly the number of requests in
-flight. Size budgets with that headroom in mind. Do not treat the quota as a
-hard admission limit.
+nothing. The debit records the real spend after the response, and runs
+asynchronously: the response is released before the debit lands. So the
+overrun window covers both concurrent requests for the same principal, which
+each pass their own check before any debit lands, and the principal's next
+sequential request, which can be admitted against the pre-debit counter while
+the previous `/report` is still in flight (bounded by `timeout_seconds`). A
+burst can therefore exceed the budget by roughly the requests admitted within
+one `/report` latency. Size budgets with that headroom in mind. Do not treat the
+quota as a hard admission limit.
 
 ## Config
 
@@ -135,6 +141,13 @@ localhost or demo Limitador only. The transport is the host's (see Deployment),
 so TLS, the CA trust store and any client certificate for mTLS are configured on
 the host transport, not in this plugin.
 
+The bundled `ppe` hyper transport trusts only the webpki public roots and
+presents no client certificate. An `https://` endpoint for an in-cluster
+Limitador signed by a service CA or any private CA therefore fails to verify
+with that transport, and it cannot do mTLS. For https or mTLS to such a
+Limitador, the host must install a transport configured with that CA and a
+client identity. Do not fall back to `insecure_http` to work around it.
+
 The plugin reads only the subject id it keys on, never a credential.
 `read_subject` exposes that id; `read_claims`, required for a non-`sub`
 `identity_claim`, also exposes the subject id.
@@ -175,8 +188,11 @@ The debit path (`cmf.llm_output`) never denies, and it runs off the response
 path: the `/report` call is dispatched asynchronously so a slow Limitador does
 not add its round trip to the response tail. A failed debit is recorded as a
 per-principal pending debit and re-reported by the next admission, which is
-denied (`quota.unsettled_debit`) until it lands. So the debit is best-effort for
-latency but still fail-closed for correctness.
+denied (`quota.unsettled_debit`) until it lands. The pending state is per
+replica and in process: a restart loses it. On shutdown the plugin drains
+in-flight debits, bounded by `timeout_seconds`, so a clean restart lets them
+land or record; a debit still in flight when that bound elapses, or when the
+process dies, is lost.
 
 Neither call retries: `/report` increments unconditionally, so a repeat would
 double-charge, and `/check` skips retry to keep tail latency off the admission
