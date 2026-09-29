@@ -571,6 +571,27 @@ async fn check_fails_closed_on_a_config_error_4xx_even_under_on_error_allow() {
     assert_eq!(violation.code, "quota.backend_unavailable");
 }
 
+#[tokio::test]
+async fn check_fails_closed_on_a_redirect_even_under_on_error_allow() {
+    // The host transport does not follow redirects, so an http-to-https
+    // redirect answers every /check with a 3xx. It must deny, not ride
+    // on_error: allow and serve every request unmetered.
+    for status in [301_u16, 308] {
+        let t = Arc::new(FakeTransport::new().json("/check", status, ""));
+        let handler = QuotaCheck::new(core("allow"));
+        let mut ctx = PluginContext::new();
+        let result = handler
+            .handle(&input_payload(), &ext_with_sub("bob", t), &mut ctx)
+            .await;
+        assert!(
+            result.is_denied(),
+            "a {status} must fail closed even under on_error: allow"
+        );
+        let violation = result.violation.expect("a denial carries a violation");
+        assert_eq!(violation.code, "quota.backend_unavailable");
+    }
+}
+
 /// A stateful in-process transport that models the real Limitador counter:
 /// `/check` with the plugin's probe delta of 1 refuses once the counter would
 /// exceed `max`, and `/report` increments unconditionally. This is what a

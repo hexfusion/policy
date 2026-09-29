@@ -149,17 +149,18 @@ fn classify(err: &HttpRequestError) -> BackendErrorKind {
 
 /// Sort an unexpected Limitador HTTP status into a [`BackendErrorKind`].
 ///
-/// A non-429 4xx is a permanent request fault: a wrong namespace or path, an
-/// auth failure, a rejected body. No retry fixes it, so it fails closed
-/// regardless of `on_error` — otherwise a misconfigured deployment serves every
-/// request unmetered under `on_error: allow`. Everything else (5xx, and any
-/// other unexpected status) is a transient server-side fault that `on_error`
-/// governs. `/check` maps 429 to a verdict before reaching here.
+/// Only a 5xx is a transient server-side fault that `on_error` governs.
+/// Everything else fails closed regardless of `on_error`: a non-429 4xx (wrong
+/// namespace or path, auth, rejected body), a 3xx (the host transport does not
+/// follow redirects, so an http-to-https redirect would answer every call), a
+/// 1xx, or an unknown status. Enumerating the transient set, as `classify` does,
+/// keeps a misconfiguration from serving unmetered under `on_error: allow`.
+/// `/check` maps 429 to a verdict before reaching here.
 fn classify_status(status: u16) -> BackendErrorKind {
-    if (400..500).contains(&status) {
-        BackendErrorKind::Unavailable
-    } else {
+    if (500..600).contains(&status) {
         BackendErrorKind::Transport
+    } else {
+        BackendErrorKind::Unavailable
     }
 }
 
@@ -290,11 +291,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn check_non_429_4xx_fails_closed() {
-        // A 4xx other than 429 is a permanent request fault (bad namespace/path,
-        // auth, rejected body). It must map to Unavailable so it denies
-        // regardless of on_error, never serving unmetered on a misconfiguration.
-        for status in [400_u16, 401, 403, 404, 422] {
+    async fn check_non_5xx_unexpected_status_fails_closed() {
+        // Anything but 200, 429 and 5xx (a 1xx, a 3xx redirect the transport
+        // will not follow, a non-429 4xx, an unknown code) is permanent and must
+        // map to Unavailable so it denies regardless of on_error.
+        for status in [101_u16, 301, 302, 307, 308, 400, 401, 403, 404, 422, 600] {
             let t = Arc::new(FakeTransport::new().json("/check", status, ""));
             let err = client()
                 .check(&ext_with(&t), "sub", "bob")

@@ -23,7 +23,7 @@ Written under `plugins[<name>].config`.
 | `endpoint` | string | required | Limitador base URL, e.g. `http://limitador.grid-system.svc:8080`. The plugin POSTs to `{endpoint}/check` and `{endpoint}/report`. |
 | `namespace` | string | required | Limitador limit namespace the counters live under, e.g. `grid-tokens`. The budget value itself lives in Limitador's `limits.yaml`, not here. |
 | `identity_claim` | string | `sub` | Which resolved-identity value keys the budget, and the Limitador descriptor key. `sub` reads the authenticated subject id. Must be a verified, always-present claim (see Identity). |
-| `on_error` | `deny` \| `allow` | `deny` | What to do when a Limitador call fails for a transient reason (timeout, refused connection, dropped socket, oversize response, or a 5xx). `deny` fails closed, `allow` serves. Governs only those transient failures, never an over-budget verdict and never a permanent fault such as a non-429 4xx (see Failure behavior). |
+| `on_error` | `deny` \| `allow` | `deny` | What to do when a Limitador call fails for a transient reason (timeout, refused connection, dropped socket, oversize response, or a 5xx). `deny` fails closed, `allow` serves. Governs only those transient failures, never an over-budget verdict and never a permanent fault such as a 3xx or non-429 4xx (see Failure behavior). |
 | `timeout_seconds` | integer | `5` | Per-call HTTP timeout, so a slow Limitador fails fast into the failure path rather than stalling the request. |
 | `missing_usage_charge` | integer | `1000` | Tokens debited when usage cannot be determined (a streamed response, or a provider without typed usage). Non-zero so the balance still moves; over-charge is the fail-closed direction. Size it at or above the largest response a principal may draw (see Usage metering). |
 | `insecure_http` | bool | `false` | Allow a plaintext `http://` endpoint. Default requires `https://` so the host transport encrypts the connection to Limitador. Set `true` only for a localhost or demo Limitador with no TLS; the principal's subject id then crosses the network in cleartext (see Security requirements). |
@@ -164,9 +164,9 @@ The check path is the gate. Its outcomes:
 | Over budget | deny (HTTP 429) | `quota.exhausted` |
 | No resolved identity, `allow_unauthenticated: false` | deny | `quota.no_identity` |
 | No resolved identity, `allow_unauthenticated: true` | allow (logged) | |
-| No transport, `perform_http` withheld, or a malformed request | deny, regardless of `on_error` | `quota.backend_unavailable` |
+| No transport, `perform_http` withheld, a malformed request, or a Limitador status other than 200, 429 or 5xx (a 1xx, a 3xx redirect, a non-429 4xx) | deny, regardless of `on_error` | `quota.backend_unavailable` |
 | Host refused the call (egress policy, SSRF guard, open circuit) | deny, regardless of `on_error` | `quota.egress_denied` |
-| Transient Limitador failure (timeout, connect, io, oversize, or unexpected status) | `on_error`: `deny` denies, `allow` serves | `quota.backend_unavailable` (under `deny`) |
+| Transient Limitador failure (timeout, connect, io, oversize, or a 5xx) | `on_error`: `deny` denies, `allow` serves | `quota.backend_unavailable` (under `deny`) |
 
 `on_error` governs only the last row. Every permanent fault fails closed on its
 own, so a misconfiguration cannot silently stop enforcement.
