@@ -40,12 +40,6 @@ pub struct QuotaConfig {
     #[serde(default)]
     pub on_error: OnErrorMode,
 
-    /// Fallback path to the token total in the response body, read only when
-    /// the gateway's typed usage is absent, e.g. `usage.total_tokens`.
-    /// Segments split on `.` or `/`.
-    #[serde(default = "default_usage_json_path")]
-    pub usage_json_path: String,
-
     /// Per-call HTTP timeout in seconds, so a slow Limitador fails fast into
     /// the `on_error` path rather than stalling the request. Default 5.
     #[serde(default = "default_timeout_seconds")]
@@ -80,10 +74,6 @@ pub enum OnErrorMode {
 
 fn default_identity_claim() -> String {
     "sub".to_owned()
-}
-
-fn default_usage_json_path() -> String {
-    "usage.total_tokens".to_owned()
 }
 
 /// Default per-call HTTP timeout, in seconds.
@@ -132,7 +122,6 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(cfg.identity_claim, "sub");
-        assert_eq!(cfg.usage_json_path, "usage.total_tokens");
         assert_eq!(cfg.on_error, OnErrorMode::Deny);
         assert_eq!(cfg.timeout_seconds, 5);
         assert_eq!(cfg.missing_usage_charge, 1000);
@@ -149,14 +138,12 @@ mod tests {
             "namespace": "ns",
             "identity_claim": "tenant",
             "on_error": "deny",
-            "usage_json_path": "usage/total_tokens",
             "timeout_seconds": 2,
             "allow_unauthenticated": true,
         }))
         .unwrap();
         assert_eq!(cfg.identity_claim, "tenant");
         assert_eq!(cfg.on_error, OnErrorMode::Deny);
-        assert_eq!(cfg.usage_json_path, "usage/total_tokens");
         assert_eq!(cfg.timeout_seconds, 2);
         assert!(cfg.allow_unauthenticated);
     }
@@ -181,7 +168,6 @@ mod tests {
             namespace: "ns".to_owned(),
             identity_claim: default_identity_claim(),
             on_error: OnErrorMode::Allow,
-            usage_json_path: default_usage_json_path(),
             timeout_seconds: 5,
             missing_usage_charge: default_missing_usage_charge(),
             allow_unauthenticated: false,
@@ -197,7 +183,6 @@ mod tests {
             namespace: "   ".to_owned(),
             identity_claim: default_identity_claim(),
             on_error: OnErrorMode::Allow,
-            usage_json_path: default_usage_json_path(),
             timeout_seconds: 5,
             missing_usage_charge: default_missing_usage_charge(),
             allow_unauthenticated: false,

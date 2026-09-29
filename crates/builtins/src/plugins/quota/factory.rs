@@ -19,7 +19,6 @@
 //           namespace: grid-tokens
 //           identity_claim: sub      # must be a verified, always-present claim
 //           on_error: deny           # transport failures fail closed (the default)
-//           usage_json_path: usage.total_tokens
 //           allow_unauthenticated: false  # a request with no identity denies (the default)
 //
 // The two hook points are registered from code, so the operator's `hooks:`

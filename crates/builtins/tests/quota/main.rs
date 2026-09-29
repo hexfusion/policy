@@ -232,36 +232,17 @@ async fn egress_denied_fails_closed_even_when_on_error_allow() {
 }
 
 #[tokio::test]
-async fn report_debits_the_parsed_total() {
+async fn report_debits_the_fallback_when_typed_usage_absent() {
     let t = Arc::new(FakeTransport::new().json("/report", 200, ""));
     let handler = QuotaReport::new(core("allow"));
     let mut ctx = PluginContext::new();
-    let body = r#"{"choices":[],"usage":{"prompt_tokens":5,"total_tokens":11}}"#;
+    // No typed usage on the completion extension (a streamed response, or a
+    // provider without typed usage): the debit falls to the conservative
+    // fallback (missing_usage_charge, default 1000), never nothing. The response
+    // body is not parsed for a total.
     let result = handler
         .handle(
-            &output_payload(body),
-            &ext_with_sub("bob", as_transport(&t)),
-            &mut ctx,
-        )
-        .await;
-    assert!(!result.is_denied(), "the report hook never denies");
-    let sent =
-        String::from_utf8_lossy(&t.last_request().expect("a debit was posted").body).into_owned();
-    assert!(sent.contains(r#""delta":11"#), "{sent}");
-    assert!(sent.contains(r#""sub":"bob""#), "{sent}");
-}
-
-#[tokio::test]
-async fn report_debits_the_fallback_when_usage_absent() {
-    let t = Arc::new(FakeTransport::new().json("/report", 200, ""));
-    let handler = QuotaReport::new(core("allow"));
-    let mut ctx = PluginContext::new();
-    // Streaming chunk with no usage object: undetermined usage debits the
-    // conservative fallback (missing_usage_charge, default 1000), never nothing.
-    let body = r#"{"choices":[{"delta":{"content":"hi"}}]}"#;
-    let result = handler
-        .handle(
-            &output_payload(body),
+            &output_payload("streamed text with no typed usage"),
             &ext_with_sub("bob", as_transport(&t)),
             &mut ctx,
         )
@@ -274,14 +255,17 @@ async fn report_debits_the_fallback_when_usage_absent() {
 
 #[tokio::test]
 async fn report_never_denies_even_when_the_debit_fails() {
-    // Limitador answers the debit with a 500. The response is already out,
-    // so this must be swallowed, not turned into a denial.
+    // Limitador answers the debit with a 500. The debit is best-effort, so this
+    // must be swallowed, not turned into a denial.
     let t = Arc::new(FakeTransport::new().json("/report", 500, ""));
     let handler = QuotaReport::new(core("allow"));
     let mut ctx = PluginContext::new();
-    let body = r#"{"usage":{"total_tokens":11}}"#;
     let result = handler
-        .handle(&output_payload(body), &ext_with_sub("bob", t), &mut ctx)
+        .handle(
+            &output_payload("done"),
+            &ext_with_sub_and_usage("bob", 11, as_transport(&t)),
+            &mut ctx,
+        )
         .await;
     assert!(!result.is_denied(), "a failed debit must never deny");
 }
@@ -296,8 +280,8 @@ async fn a_failed_debit_denies_until_it_settles() {
     let report = QuotaReport::new(Arc::clone(&core));
     let out = report
         .handle(
-            &output_payload(r#"{"usage":{"total_tokens":11}}"#),
-            &ext_with_sub("bob", as_transport(&t_fail)),
+            &output_payload("done"),
+            &ext_with_sub_and_usage("bob", 11, as_transport(&t_fail)),
             &mut PluginContext::new(),
         )
         .await;
@@ -363,8 +347,8 @@ async fn a_cancelled_flush_does_not_wedge_the_principal() {
     let t_fail = Arc::new(FakeTransport::new().json("/report", 500, ""));
     let out = QuotaReport::new(Arc::clone(&core))
         .handle(
-            &output_payload(r#"{"usage":{"total_tokens":7}}"#),
-            &ext_with_sub("bob", as_transport(&t_fail)),
+            &output_payload("done"),
+            &ext_with_sub_and_usage("bob", 7, as_transport(&t_fail)),
             &mut PluginContext::new(),
         )
         .await;
@@ -428,11 +412,11 @@ async fn report_debits_the_typed_completion_usage() {
 }
 
 #[tokio::test]
-async fn report_prefers_the_typed_usage_over_a_body_total() {
+async fn report_ignores_the_response_body_and_uses_typed_usage() {
     let t = Arc::new(FakeTransport::new().json("/report", 200, ""));
     let handler = QuotaReport::new(core("allow"));
     let mut ctx = PluginContext::new();
-    // A hostile body claiming a tiny cost must not win over the typed slot.
+    // A body claiming a tiny cost must not be parsed or win over the typed slot.
     let body = r#"{"usage":{"total_tokens":1}}"#;
     let result = handler
         .handle(
@@ -514,47 +498,6 @@ async fn report_skips_the_debit_without_a_resolved_identity() {
         .await;
     assert!(!result.is_denied());
     assert_eq!(t.call_count_for("/report"), 0, "no identity means no debit");
-}
-
-#[tokio::test]
-async fn report_charges_the_fallback_on_a_fractional_body_total() {
-    let t = Arc::new(FakeTransport::new().json("/report", 200, ""));
-    let handler = QuotaReport::new(core("allow"));
-    let mut ctx = PluginContext::new();
-    // No typed slot; a fractional body total is not a token count.
-    let body = r#"{"usage":{"total_tokens":1.5}}"#;
-    let result = handler
-        .handle(
-            &output_payload(body),
-            &ext_with_sub("bob", as_transport(&t)),
-            &mut ctx,
-        )
-        .await;
-    assert!(!result.is_denied());
-    // A malformed total is undetermined usage, so it debits the fallback.
-    let sent =
-        String::from_utf8_lossy(&t.last_request().expect("a fallback debit").body).into_owned();
-    assert!(sent.contains(r#""delta":1000"#), "{sent}");
-}
-
-#[tokio::test]
-async fn report_charges_the_fallback_on_a_negative_body_total() {
-    let t = Arc::new(FakeTransport::new().json("/report", 200, ""));
-    let handler = QuotaReport::new(core("allow"));
-    let mut ctx = PluginContext::new();
-    let body = r#"{"usage":{"total_tokens":-5}}"#;
-    let result = handler
-        .handle(
-            &output_payload(body),
-            &ext_with_sub("bob", as_transport(&t)),
-            &mut ctx,
-        )
-        .await;
-    assert!(!result.is_denied());
-    // A negative total is undetermined usage, so it debits the fallback.
-    let sent =
-        String::from_utf8_lossy(&t.last_request().expect("a fallback debit").body).into_owned();
-    assert!(sent.contains(r#""delta":1000"#), "{sent}");
 }
 
 #[tokio::test]

@@ -23,13 +23,26 @@ Written under `plugins[<name>].config`.
 | `endpoint` | string | required | Limitador base URL, e.g. `http://limitador.grid-system.svc:8080`. The plugin POSTs to `{endpoint}/check` and `{endpoint}/report`. |
 | `namespace` | string | required | Limitador limit namespace the counters live under, e.g. `grid-tokens`. The budget value itself lives in Limitador's `limits.yaml`, not here. |
 | `identity_claim` | string | `sub` | Which resolved-identity value keys the budget, and the Limitador descriptor key. `sub` reads the authenticated subject id. Must be a verified, always-present claim (see Identity). |
-| `on_error` | `deny` \| `allow` | `deny` | What to do when a Limitador call fails for a transient reason (timeout, refused connection, dropped socket, oversize response, or an unexpected Limitador status). `deny` fails closed, `allow` serves. Governs only those transient failures, never an over-budget verdict and never a permanent fault (see Failure behavior). |
-| `usage_json_path` | string | `usage.total_tokens` | Fallback path to the token total in the response body, read only when the gateway's typed usage is absent. Segments split on `.` or `/`. |
+| `on_error` | `deny` \| `allow` | `deny` | What to do when a Limitador call fails for a transient reason (timeout, refused connection, dropped socket, oversize response, or a 5xx). `deny` fails closed, `allow` serves. Governs only those transient failures, never an over-budget verdict and never a permanent fault such as a non-429 4xx (see Failure behavior). |
 | `timeout_seconds` | integer | `5` | Per-call HTTP timeout, so a slow Limitador fails fast into the failure path rather than stalling the request. |
+| `missing_usage_charge` | integer | `1000` | Tokens debited when usage cannot be determined (a streamed response, or a provider without typed usage). Non-zero so the balance still moves; over-charge is the fail-closed direction. Size it at or above the largest response a principal may draw (see Usage metering). |
 | `allow_unauthenticated` | bool | `false` | Whether to serve a request that carries no resolved identity. Default denies (nothing to meter, so fail closed). Set `true` only when authentication is enforced upstream and an unauthenticated request should pass unmetered by design. Every such request then logs a warning. |
 
 `endpoint` and `namespace` must be non-empty or the plugin fails to construct.
 An unknown config key is rejected rather than ignored.
+
+## Usage metering
+
+The debit charges the gateway's typed usage: the `total_tokens` the completion
+extension carries after the response. The response body is not parsed for a
+token count. The `cmf.llm_output` message carries the model's generated text,
+not the provider's usage block, so a body total would meter on model output and
+is easy to forge.
+
+When typed usage is absent the debit falls back to `missing_usage_charge`, never
+to zero. Accurate metering therefore requires the gateway to populate typed
+usage on the completion extension; without it every response debits the flat
+fallback.
 
 ## Capabilities
 
@@ -58,7 +71,6 @@ plugins:
       namespace: grid-tokens
       identity_claim: sub
       on_error: deny
-      usage_json_path: usage.total_tokens
       timeout_seconds: 5
       allow_unauthenticated: false
 ```

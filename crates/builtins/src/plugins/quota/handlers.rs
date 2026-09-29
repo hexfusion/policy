@@ -338,8 +338,8 @@ impl HookHandler<CmfHook> for QuotaCheck {
     }
 }
 
-/// Post-invoke handler on `cmf.llm_output`. Debits the token usage (typed
-/// first, response body as a fallback). Never denies.
+/// Post-invoke handler on `cmf.llm_output`. Debits the gateway's typed token
+/// usage, or a conservative fallback when it is absent. Never denies.
 #[derive(Debug)]
 pub struct QuotaReport {
     core: Arc<Quota>,
@@ -362,7 +362,7 @@ impl Plugin for QuotaReport {
 impl HookHandler<CmfHook> for QuotaReport {
     async fn handle(
         &self,
-        payload: &MessagePayload,
+        _payload: &MessagePayload,
         extensions: &Extensions,
         _ctx: &mut PluginContext,
     ) -> PluginResult<MessagePayload> {
@@ -372,19 +372,16 @@ impl HookHandler<CmfHook> for QuotaReport {
             return PluginResult::allow();
         };
 
-        // Prefer the gateway's typed usage; fall back to the response body.
+        // The gateway's typed usage is the only trusted source. Absent it (a
+        // streamed response, or a provider without typed usage) debit the
+        // conservative fallback, never zero. The response body is not parsed:
+        // the CMF output carries the model's generated text, not the provider's
+        // usage block, so a body total would meter on model output.
         let total = extensions
             .completion
             .as_ref()
             .and_then(|c| c.tokens.as_ref())
             .map(|t| u64::from(t.total_tokens))
-            .or_else(|| {
-                extract_usage(
-                    &payload.message.get_text_content(),
-                    &self.core.typed.usage_json_path,
-                )
-            })
-            // Undetermined usage debits the fallback, never 0.
             .unwrap_or(self.core.typed.missing_usage_charge);
         if total == 0 {
             return PluginResult::allow();
@@ -421,26 +418,6 @@ fn resolve_identity<'a>(
         subject.claim_str(identity_claim)
     };
     value.filter(|v| !v.is_empty())
-}
-
-/// Read a non-negative integer token total at `path` (split on `.` or `/`)
-/// in `body` parsed as JSON. `None` if absent or not such an integer.
-fn extract_usage(body: &str, path: &str) -> Option<u64> {
-    let root: serde_json::Value = serde_json::from_str(body).ok()?;
-    let mut cursor = &root;
-    for segment in path.split(['.', '/']).filter(|s| !s.is_empty()) {
-        cursor = cursor.get(segment)?;
-    }
-    number_as_u64(cursor)
-}
-
-/// A `serde_json::Value` as a non-negative integer (number or numeric
-/// string). Floats are refused, not truncated.
-fn number_as_u64(value: &serde_json::Value) -> Option<u64> {
-    if let Some(n) = value.as_u64() {
-        return Some(n);
-    }
-    value.as_str().and_then(|s| s.trim().parse::<u64>().ok())
 }
 
 #[cfg(test)]
@@ -495,41 +472,5 @@ mod tests {
     fn resolve_identity_treats_empty_as_absent() {
         let ext = security_with_sub("");
         assert_eq!(resolve_identity(&ext, "sub"), None);
-    }
-
-    #[test]
-    fn extract_usage_reads_the_default_path() {
-        let body = r#"{"choices":[],"usage":{"prompt_tokens":5,"total_tokens":11}}"#;
-        assert_eq!(extract_usage(body, "usage.total_tokens"), Some(11));
-    }
-
-    #[test]
-    fn extract_usage_accepts_slash_separators() {
-        let body = r#"{"usage":{"total_tokens":11}}"#;
-        assert_eq!(extract_usage(body, "usage/total_tokens"), Some(11));
-    }
-
-    #[test]
-    fn extract_usage_is_none_when_absent() {
-        // Streaming chunk without include_usage, no usage object at all.
-        let body = r#"{"choices":[{"delta":{"content":"hi"}}]}"#;
-        assert_eq!(extract_usage(body, "usage.total_tokens"), None);
-    }
-
-    #[test]
-    fn extract_usage_is_none_for_non_json() {
-        assert_eq!(extract_usage("not json", "usage.total_tokens"), None);
-    }
-
-    #[test]
-    fn extract_usage_reads_a_numeric_string() {
-        let body = r#"{"usage":{"total_tokens":"11"}}"#;
-        assert_eq!(extract_usage(body, "usage.total_tokens"), Some(11));
-    }
-
-    #[test]
-    fn extract_usage_refuses_a_float() {
-        let body = r#"{"usage":{"total_tokens":11.5}}"#;
-        assert_eq!(extract_usage(body, "usage.total_tokens"), None);
     }
 }
