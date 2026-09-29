@@ -446,7 +446,7 @@ mod tests {
     #[cfg(not(feature = "experimental-quota"))]
     #[test]
     fn quota_is_not_registered_without_the_experimental_feature() {
-        let err = load_error_for_kind("quota");
+        let err = load_error_for_kind("quota/limitador");
         assert!(
             err.contains("no factory registered"),
             "quota must not register without experimental-quota; got: {err}"
@@ -458,7 +458,7 @@ mod tests {
     #[cfg(feature = "experimental-quota")]
     #[test]
     fn quota_registers_with_the_experimental_feature() {
-        let err = load_error_for_kind("quota");
+        let err = load_error_for_kind("quota/limitador");
         assert!(
             !err.contains("no factory registered"),
             "experimental-quota is on, so quota must register; got: {err}"

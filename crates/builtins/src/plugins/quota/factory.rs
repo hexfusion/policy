@@ -6,7 +6,7 @@
 //
 //     plugins:
 //       - name: token-quota
-//         kind: quota
+//         kind: quota/limitador
 //         hooks: [cmf.llm_input, cmf.llm_output]
 //         # All three are required. read_subject/read_claims: without them the
 //         # identity is filtered to None, which now denies (see
@@ -44,10 +44,11 @@ use praxis_policy_core::registry::AnyHookHandler;
 
 use super::handlers::{Quota, QuotaCheck, QuotaReport};
 
-/// The `kind:` string operators write in PPE YAML.
-pub const KIND: &str = "quota";
+/// The `kind:` string operators write in PPE YAML. Namespaced (`quota/…`) so a
+/// second quota backend can register its own kind alongside this Limitador one.
+pub const KIND: &str = "quota/limitador";
 
-/// Factory for `kind: quota`. Builds one shared [`Quota`] core and registers
+/// Factory for `kind: quota/limitador`. Builds one shared [`Quota`] core and registers
 /// the check on `cmf.llm_input` and the debit on `cmf.llm_output`.
 pub struct QuotaFactory;
 

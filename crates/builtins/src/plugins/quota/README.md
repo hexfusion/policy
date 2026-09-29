@@ -50,7 +50,7 @@ closed by default (`quota.no_identity`) and serves unmetered only when
 ```yaml
 plugins:
   - name: token-quota
-    kind: quota
+    kind: quota/limitador
     hooks: [cmf.llm_input, cmf.llm_output]
     capabilities: [read_subject, read_claims, perform_http]
     config:
