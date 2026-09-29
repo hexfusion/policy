@@ -46,6 +46,7 @@ fn core(on_error: &str) -> Arc<Quota> {
             "namespace": "grid-tokens",
             "on_error": on_error,
             "timeout_seconds": 1,
+            "insecure_http": true,
         })),
         ..Default::default()
     };
@@ -490,6 +491,7 @@ async fn check_allows_without_identity_when_allow_unauthenticated() {
             "endpoint": "http://limitador.test",
             "namespace": "grid-tokens",
             "allow_unauthenticated": true,
+            "insecure_http": true,
         })),
         ..Default::default()
     };

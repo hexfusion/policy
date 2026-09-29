@@ -26,6 +26,7 @@ Written under `plugins[<name>].config`.
 | `on_error` | `deny` \| `allow` | `deny` | What to do when a Limitador call fails for a transient reason (timeout, refused connection, dropped socket, oversize response, or a 5xx). `deny` fails closed, `allow` serves. Governs only those transient failures, never an over-budget verdict and never a permanent fault such as a non-429 4xx (see Failure behavior). |
 | `timeout_seconds` | integer | `5` | Per-call HTTP timeout, so a slow Limitador fails fast into the failure path rather than stalling the request. |
 | `missing_usage_charge` | integer | `1000` | Tokens debited when usage cannot be determined (a streamed response, or a provider without typed usage). Non-zero so the balance still moves; over-charge is the fail-closed direction. Size it at or above the largest response a principal may draw (see Usage metering). |
+| `insecure_http` | bool | `false` | Allow a plaintext `http://` endpoint. Default requires `https://` so the host transport encrypts the connection to Limitador. Set `true` only for a localhost or demo Limitador with no TLS; the principal's subject id then crosses the network in cleartext (see Security requirements). |
 | `allow_unauthenticated` | bool | `false` | Whether to serve a request that carries no resolved identity. Default denies (nothing to meter, so fail closed). Set `true` only when authentication is enforced upstream and an unauthenticated request should pass unmetered by design. Every such request then logs a warning. |
 
 `endpoint` and `namespace` must be non-empty or the plugin fails to construct.
@@ -67,12 +68,13 @@ plugins:
     hooks: [cmf.llm_input, cmf.llm_output]
     capabilities: [read_subject, read_claims, perform_http]
     config:
-      endpoint: http://limitador.grid-system.svc:8080
+      endpoint: https://limitador.grid-system.svc:8443
       namespace: grid-tokens
       identity_claim: sub
       on_error: deny
       timeout_seconds: 5
       allow_unauthenticated: false
+      # insecure_http: true   # only for a localhost/demo Limitador with no TLS
 ```
 
 The plugin registers both hooks itself; the `hooks` list in config has no
@@ -109,9 +111,11 @@ plaintext subject id in the request body and sends no credential, so any
 workload that can reach Limitador can debit or check any principal: a
 `POST /report` with a victim's subject id drains that victim's budget. Restrict
 who can reach Limitador and authenticate the connection with mTLS or an
-equivalent. The transport is the host's (see Deployment), so mTLS, the CA trust
-store and any client certificate are configured on the host transport, not in
-this plugin.
+equivalent. The `endpoint` must be `https://` by default, so the host transport
+encrypts the connection; `insecure_http: true` opts into plaintext for a
+localhost or demo Limitador only. The transport is the host's (see Deployment),
+so TLS, the CA trust store and any client certificate for mTLS are configured on
+the host transport, not in this plugin.
 
 The plugin reads only the subject id it keys on, never a credential.
 `read_subject` exposes that id; `read_claims`, required for a non-`sub`

@@ -50,6 +50,7 @@ fn core() -> Arc<Quota> {
         config: Some(json!({
             "endpoint": "http://limitador.bench",
             "namespace": "grid-tokens",
+            "insecure_http": true,
         })),
         ..Default::default()
     };

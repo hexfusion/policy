@@ -59,6 +59,15 @@ pub struct QuotaConfig {
     /// every such request then logs a warning.
     #[serde(default)]
     pub allow_unauthenticated: bool,
+
+    /// Allow a plaintext `http://` endpoint. Default false: the endpoint must be
+    /// `https://` so the host transport establishes TLS to Limitador. The plugin
+    /// sends each principal's subject id in the request body, so a plaintext
+    /// endpoint exposes it on the wire. Set true only for a localhost or demo
+    /// Limitador with no TLS. TLS, the CA trust store and any client certificate
+    /// for mTLS live on the host transport, not in this plugin.
+    #[serde(default)]
+    pub insecure_http: bool,
 }
 
 /// How the plugin reacts when a Limitador call cannot be completed.
@@ -91,13 +100,27 @@ impl QuotaConfig {
     ///
     /// # Errors
     ///
-    /// A message when `endpoint` or `namespace` is empty.
+    /// A message when `endpoint` or `namespace` is empty, or when `endpoint` is
+    /// a plaintext `http://` URL and `insecure_http` is not set.
     pub fn validate(&self) -> Result<(), String> {
-        if self.endpoint.trim().is_empty() {
+        let endpoint = self.endpoint.trim();
+        if endpoint.is_empty() {
             return Err("quota: endpoint must be non-empty".to_owned());
         }
         if self.namespace.trim().is_empty() {
             return Err("quota: namespace must be non-empty".to_owned());
+        }
+        // Secure by default: an https endpoint lets the host transport encrypt
+        // the connection (and present a client certificate, if the host is
+        // configured for mTLS). A non-https scheme other than http is left to
+        // the request builder to reject.
+        if endpoint.to_ascii_lowercase().starts_with("http://") && !self.insecure_http {
+            return Err(
+                "quota: endpoint must use https:// so the connection to Limitador is \
+                 encrypted; set insecure_http: true to allow http:// for a localhost or \
+                 demo Limitador only"
+                    .to_owned(),
+            );
         }
         Ok(())
     }
@@ -129,6 +152,10 @@ mod tests {
             !cfg.allow_unauthenticated,
             "a request with no identity must fail closed by default"
         );
+        assert!(
+            !cfg.insecure_http,
+            "https must be required by default (insecure_http off)"
+        );
     }
 
     #[test]
@@ -140,12 +167,50 @@ mod tests {
             "on_error": "deny",
             "timeout_seconds": 2,
             "allow_unauthenticated": true,
+            "insecure_http": true,
         }))
         .unwrap();
         assert_eq!(cfg.identity_claim, "tenant");
         assert_eq!(cfg.on_error, OnErrorMode::Deny);
         assert_eq!(cfg.timeout_seconds, 2);
         assert!(cfg.allow_unauthenticated);
+        assert!(cfg.insecure_http);
+    }
+
+    fn config_with_endpoint(endpoint: &str, insecure_http: bool) -> QuotaConfig {
+        QuotaConfig {
+            endpoint: endpoint.to_owned(),
+            namespace: "ns".to_owned(),
+            identity_claim: default_identity_claim(),
+            on_error: OnErrorMode::Deny,
+            timeout_seconds: 5,
+            missing_usage_charge: default_missing_usage_charge(),
+            allow_unauthenticated: false,
+            insecure_http,
+        }
+    }
+
+    #[test]
+    fn an_https_endpoint_is_accepted() {
+        config_with_endpoint("https://limitador.grid-system.svc:8443", false)
+            .validate()
+            .unwrap();
+    }
+
+    #[test]
+    fn a_plaintext_endpoint_is_rejected_by_default() {
+        let err = config_with_endpoint("http://limitador.grid-system.svc:8080", false)
+            .validate()
+            .unwrap_err();
+        assert!(err.contains("https"), "{err}");
+        assert!(err.contains("insecure_http"), "{err}");
+    }
+
+    #[test]
+    fn a_plaintext_endpoint_is_allowed_with_insecure_http() {
+        config_with_endpoint("http://localhost:8080", true)
+            .validate()
+            .unwrap();
     }
 
     #[test]
@@ -163,30 +228,14 @@ mod tests {
 
     #[test]
     fn an_empty_endpoint_is_rejected() {
-        let cfg = QuotaConfig {
-            endpoint: String::new(),
-            namespace: "ns".to_owned(),
-            identity_claim: default_identity_claim(),
-            on_error: OnErrorMode::Allow,
-            timeout_seconds: 5,
-            missing_usage_charge: default_missing_usage_charge(),
-            allow_unauthenticated: false,
-        };
-        let err = cfg.validate().unwrap_err();
+        let err = config_with_endpoint("", false).validate().unwrap_err();
         assert!(err.contains("endpoint"), "{err}");
     }
 
     #[test]
     fn an_empty_namespace_is_rejected() {
-        let cfg = QuotaConfig {
-            endpoint: "http://lim:8080".to_owned(),
-            namespace: "   ".to_owned(),
-            identity_claim: default_identity_claim(),
-            on_error: OnErrorMode::Allow,
-            timeout_seconds: 5,
-            missing_usage_charge: default_missing_usage_charge(),
-            allow_unauthenticated: false,
-        };
+        let mut cfg = config_with_endpoint("https://lim:8443", false);
+        cfg.namespace = "   ".to_owned();
         let err = cfg.validate().unwrap_err();
         assert!(err.contains("namespace"), "{err}");
     }

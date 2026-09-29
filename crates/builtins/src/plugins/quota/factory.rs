@@ -15,11 +15,12 @@
 //         # every metered request, regardless of on_error.
 //         capabilities: [read_subject, read_claims, perform_http]
 //         config:
-//           endpoint: http://limitador.grid-system.svc:8080
+//           endpoint: https://limitador.grid-system.svc:8443
 //           namespace: grid-tokens
 //           identity_claim: sub      # must be a verified, always-present claim
 //           on_error: deny           # transport failures fail closed (the default)
 //           allow_unauthenticated: false  # a request with no identity denies (the default)
+//           # insecure_http: true    # only for a localhost/demo Limitador with no TLS
 //
 // The two hook points are registered from code, so the operator's `hooks:`
 // list is documentation, not a lever.
@@ -91,6 +92,7 @@ mod tests {
         serde_json::json!({
             "endpoint": "http://limitador.grid-system.svc:8080",
             "namespace": "grid-tokens",
+            "insecure_http": true,
         })
     }
 
