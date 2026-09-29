@@ -36,8 +36,10 @@
 //! Commit, absent from released Limitador. Deployment requires an authenticated,
 //! network-restricted Limitador.
 
-/// The backend contract: the trait, its verdict, and its error.
-pub mod backend;
+// The backend contract (trait, verdict, error) is crate-internal: there is no
+// public constructor that accepts a custom backend yet, so keeping the types
+// unexported avoids committing to that surface prematurely.
+mod backend;
 /// Plugin configuration and its validation.
 pub mod config;
 /// Constructs the plugin from configuration.
@@ -48,7 +50,6 @@ pub mod handlers;
 // Private so no Limitador type reaches the public surface.
 mod client;
 
-pub use backend::{BackendError, CheckOutcome, QuotaBackend};
 pub use config::{OnErrorMode, QuotaConfig};
 pub use factory::{KIND, QuotaFactory};
 pub use handlers::{

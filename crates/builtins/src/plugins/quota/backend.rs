@@ -10,7 +10,7 @@ use praxis_policy_core::hooks::Extensions;
 
 /// Verdict of a backend `check`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CheckOutcome {
+pub(crate) enum CheckOutcome {
     /// Within budget: the request may proceed.
     WithinLimit,
     /// Over budget: the request must be refused.
@@ -19,7 +19,7 @@ pub enum CheckOutcome {
 
 /// Whether a [`BackendError`] is a transient failure or a permanent fault.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BackendErrorKind {
+pub(crate) enum BackendErrorKind {
     /// A transient failure reaching the backend: a timeout, a refused
     /// connection, a dropped socket, or an unrecognized status. The peer may
     /// recover, so the caller's `on_error` posture governs it.
@@ -41,12 +41,12 @@ pub enum BackendErrorKind {
 /// A backend call that failed or answered unrecognizably. Distinct from an
 /// over-limit verdict, which is a successful [`CheckOutcome`].
 #[derive(Debug)]
-pub struct BackendError {
+pub(crate) struct BackendError {
     /// Human-readable cause, for logs and fail-closed denials.
-    pub message: String,
+    pub(crate) message: String,
     /// Whether the failure is transient (`on_error` applies) or a permanent
     /// wiring/capability fault (always deny).
-    pub kind: BackendErrorKind,
+    pub(crate) kind: BackendErrorKind,
 }
 
 impl std::fmt::Display for BackendError {
@@ -62,7 +62,7 @@ impl std::fmt::Display for BackendError {
 /// `ext`, so the process keeps one connection pool and TLS stack. A backend
 /// holds no HTTP client of its own.
 #[async_trait]
-pub trait QuotaBackend: std::fmt::Debug + Send + Sync {
+pub(crate) trait QuotaBackend: std::fmt::Debug + Send + Sync {
     /// Whether the descriptor is within budget, charging nothing.
     ///
     /// # Errors
